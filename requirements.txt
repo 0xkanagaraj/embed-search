@@ -1,23 +1,28 @@
-# Web framework (replaces streamlit)
+# ── Web framework ─────────────────────────────────────────────────
 fastapi
 uvicorn[standard]
-python-multipart          # required for file upload endpoints
+python-multipart          # multipart file upload support for FastAPI
 
-# Document ingestion
-pypdf
-pdf2image
-pytesseract
-Pillow
+# ── Document extraction ───────────────────────────────────────────
+pypdf                     # PDF text layer
+pdf2image                 # PDF → image for OCR fallback
+pytesseract               # OCR engine wrapper (tesseract must be installed)
+Pillow                    # image handling
+python-docx               # .docx / .doc  (NEW)
+openpyxl                  # .xlsx / .xls  (NEW)
+python-pptx               # .pptx / .ppt  (NEW)
+# csv, html.parser — stdlib, no install needed
 
-# Embeddings
-sentence-transformers
-torch
+# ── Embeddings ────────────────────────────────────────────────────
+sentence-transformers     # multilingual-MiniLM (auto-downloads on first run)
+torch                     # sentence-transformers runtime
 torchvision
 numpy
 
-# LLM
-google-genai
-python-dotenv
+# ── LLM ───────────────────────────────────────────────────────────
+google-genai              # Gemini API client (streaming support)
+python-dotenv             # loads GOOGLE_API_KEY from .env
 
-# Auth / DB
-bcrypt
+# ── Auth / DB ─────────────────────────────────────────────────────
+bcrypt                    # password hashing
+# sqlite3 — stdlib
