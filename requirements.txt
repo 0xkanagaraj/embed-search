@@ -1,0 +1,12 @@
+streamlit
+pypdf
+pdf2image
+pytesseract
+Pillow
+sentence-transformers
+torch
+numpy
+bcrypt
+google-genai
+torchvision
+python-dotenv
