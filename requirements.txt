@@ -1,12 +1,23 @@
-streamlit
+# Web framework (replaces streamlit)
+fastapi
+uvicorn[standard]
+python-multipart          # required for file upload endpoints
+
+# Document ingestion
 pypdf
 pdf2image
 pytesseract
 Pillow
+
+# Embeddings
 sentence-transformers
 torch
-numpy
-bcrypt
-google-genai
 torchvision
+numpy
+
+# LLM
+google-genai
 python-dotenv
+
+# Auth / DB
+bcrypt
