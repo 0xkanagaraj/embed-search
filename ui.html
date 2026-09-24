@@ -519,10 +519,10 @@ input, textarea { font-family: inherit; }
 
     <div class="sb-hd">Upload documents</div>
     <div class="drop-zone" id="drop-zone">
-      <input type="file" id="file-input" multiple accept=".pdf,.txt,.md">
+      <input type="file" id="file-input" multiple accept=".pdf,.txt,.md,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.csv,.html,.htm">
       <div class="drop-icon">📂</div>
       <div class="drop-text">Drop files or click to browse</div>
-      <div class="drop-hint">PDF · TXT · MD</div>
+      <div class="drop-hint">PDF · DOCX · XLSX · PPTX · CSV · HTML · TXT · MD</div>
     </div>
     <div id="pending-badge" class="pending-badge" hidden></div>
     <button id="btn-index" class="btn-index" hidden disabled>Index files</button>
@@ -616,10 +616,12 @@ input, textarea { font-family: inherit; }
 const S = {
   user:    null,
   files:   [],
-  sel:     new Set(),   // selected file IDs
+  sel:     new Set(),    // selected file IDs
   mode:    'rag',
   busy:    false,
   pending: [],           // files chosen but not yet uploaded
+  _tokBuf: {},           // msgId → accumulated token string (for streaming)
+  _msgSeq: 0,            // increments for each assistant message
 };
 
 // ════════════════════════════════════════════════════════════════
@@ -750,7 +752,8 @@ dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classL
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
 dropZone.addEventListener('drop', e => {
   e.preventDefault(); dropZone.classList.remove('over');
-  const ok = ['.pdf','.txt','.md'];
+  const ok = ['.pdf','.txt','.md','.docx','.doc','.xlsx','.xls',
+              '.pptx','.ppt','.csv','.html','.htm'];
   S.pending = Array.from(e.dataTransfer.files)
     .filter(f => ok.some(x => f.name.toLowerCase().endsWith(x)));
   refreshPending();
@@ -913,44 +916,136 @@ ta.addEventListener('keydown', e => {
   if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); $('btn-send').click(); }
 });
 
+// ── Send handler (streaming) ──────────────────────────────────────
 $('btn-send').addEventListener('click', async () => {
   const q = ta.value.trim();
   if (!q || S.busy) return;
-  S.busy = true; ta.value = ''; ta.style.height = 'auto'; updateControls();
 
-  // Remove empty state if present
+  S.busy = true;
+  ta.value = '';
+  ta.style.height = 'auto';
+  updateControls();
+
+  // Remove empty state if still shown
   const emp = chatEl.querySelector('.empty');
   if (emp) emp.remove();
 
-  addMsg('u', q);
+  // User bubble
+  addUserMsg(q);
+
+  // Typing indicator (removed as soon as first SSE event arrives)
   const typingEl = addTyping();
 
   try {
-    const d = await api('POST', '/api/query', {
-      question: q,
-      file_ids: Array.from(S.sel),
-      mode:     S.mode,
+    const resp = await fetch('/api/query', {
+      method:      'POST',
+      credentials: 'same-origin',
+      headers:     { 'Content-Type': 'application/json' },
+      body:        JSON.stringify({
+        question: q,
+        file_ids: Array.from(S.sel),
+        mode:     S.mode,
+      }),
     });
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+    }
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let   sseBuffer = '';          // holds partial SSE lines between chunks
+    let   msgId = null;            // ID of the current assistant message div
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      sseBuffer += decoder.decode(value, { stream: true });
+
+      // SSE events are separated by double newline
+      const events = sseBuffer.split('\n\n');
+      sseBuffer = events.pop();    // keep the (possibly incomplete) last chunk
+
+      for (const block of events) {
+        const line = block.trim();
+        if (!line.startsWith('data: ')) continue;
+
+        let data;
+        try { data = JSON.parse(line.slice(6)); }
+        catch { continue; }
+
+        // ── sources event ── (arrives first, ~400-700 ms)
+        if (data.type === 'sources') {
+          typingEl.remove();
+          msgId = ++S._msgSeq;
+          S._tokBuf[msgId] = '';
+          _createAssistantMsg(msgId, data.sources, S.mode !== 'search');
+        }
+
+        // ── token event ── (streams in after sources)
+        else if (data.type === 'token' && msgId !== null) {
+          S._tokBuf[msgId] += data.text;
+          // Update bubble with plain text for speed; markdown applied on done
+          const bubble = document.getElementById(`bubble-${msgId}`);
+          if (bubble) {
+            bubble.textContent = S._tokBuf[msgId];
+            chatEl.scrollTop = chatEl.scrollHeight;
+          }
+        }
+
+        // ── error event ──
+        else if (data.type === 'error' && msgId !== null) {
+          const bubble = document.getElementById(`bubble-${msgId}`);
+          if (bubble) bubble.textContent += `\n[Error: ${data.text}]`;
+        }
+
+        // ── done event ── apply final markdown rendering
+        else if (data.type === 'done') {
+          if (msgId !== null) {
+            const bubble = document.getElementById(`bubble-${msgId}`);
+            const full   = S._tokBuf[msgId] || '';
+            if (bubble && full) {
+              bubble.innerHTML = md(full);  // single markdown pass at the end
+            }
+            delete S._tokBuf[msgId];
+          }
+          chatEl.scrollTop = chatEl.scrollHeight;
+        }
+      }
+    }
+
+  } catch (e) {
     typingEl.remove();
-    addMsg('a', d.answer, d.sources);
-  } catch(e) {
-    typingEl.remove();
-    addMsg('a', 'Error: ' + e.message);
+    addSystemError('Connection error: ' + e.message);
   } finally {
-    S.busy = false; updateControls();
+    S.busy = false;
+    updateControls();
   }
 });
 
-function addMsg(role, text, sources=[]) {
-  const wrap  = document.createElement('div');
-  wrap.className = `msg ${role}`;
-  const avatar = role === 'u'
-    ? (S.user?.[0]?.toUpperCase() || 'U')
-    : '⚡';
+// ── DOM builders ──────────────────────────────────────────────────
+function addUserMsg(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg u';
+  wrap.innerHTML = `
+    <div class="msg-av">${esc(S.user?.[0]?.toUpperCase() || 'U')}</div>
+    <div class="msg-body">
+      <div class="bubble">${esc(text).replace(/\n/g,'<br>')}</div>
+    </div>`;
+  chatEl.appendChild(wrap);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
 
+function _createAssistantMsg(msgId, sources, includeBubble) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg a';
+  wrap.dataset.mid = msgId;
+
+  // Sources section (rendered immediately)
   let srcHtml = '';
   if (sources && sources.length) {
-    const cards = sources.map((s,i) => `
+    const cards = sources.map((s, i) => `
       <div class="src-card">
         <div class="src-hdr" onclick="this.nextElementSibling.classList.toggle('open')">
           <span class="src-hdr-name">${i+1}. ${esc(s.filename)}</span>
@@ -963,15 +1058,15 @@ function addMsg(role, text, sources=[]) {
     srcHtml = `<div class="srcs"><div class="srcs-lbl">Retrieved sources</div>${cards}</div>`;
   }
 
-  // Only show bubble if there's actual text
-  const bubbleHtml = text
-    ? `<div class="bubble">${role==='a' ? md(text) : esc(text).replace(/\n/g,'<br>')}</div>`
+  // Answer bubble (populated token-by-token, then formatted on done)
+  const bubbleHtml = includeBubble
+    ? `<div class="bubble" id="bubble-${msgId}" style="min-height:1.4em"></div>`
     : '';
 
   wrap.innerHTML = `
-    <div class="msg-av">${avatar}</div>
-    <div class="msg-body">${bubbleHtml}${srcHtml}</div>
-  `;
+    <div class="msg-av">⚡</div>
+    <div class="msg-body" id="body-${msgId}">${srcHtml}${bubbleHtml}</div>`;
+
   chatEl.appendChild(wrap);
   chatEl.scrollTop = chatEl.scrollHeight;
   return wrap;
@@ -999,6 +1094,18 @@ function sysNote(text) {
   el.className = 'sys-note';
   el.textContent = text;
   chatEl.appendChild(el);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function addSystemError(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg a';
+  wrap.innerHTML = `
+    <div class="msg-av">⚡</div>
+    <div class="msg-body">
+      <div class="bubble" style="color:#ef4444">${esc(text)}</div>
+    </div>`;
+  chatEl.appendChild(wrap);
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 
