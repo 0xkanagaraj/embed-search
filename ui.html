@@ -622,17 +622,32 @@ const S = {
   pending: [],           // files chosen but not yet uploaded
   _tokBuf: {},           // msgId → accumulated token string (for streaming)
   _msgSeq: 0,            // increments for each assistant message
+  history: [],           // [{role:'user'|'assistant', content}, ...] this session
 };
 
 // ════════════════════════════════════════════════════════════════
 // API
 // ════════════════════════════════════════════════════════════════
+function getCookie(name) {
+  const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+// State-changing requests (anything but GET) need the CSRF token that was
+// issued as a (non-httponly, readable) cookie at login — see server.py's
+// _require_csrf. Login/signup themselves don't need it (no session yet).
+function csrfHeaders(method) {
+  if (method === 'GET') return {};
+  const token = getCookie('csrf');
+  return token ? { 'X-CSRF-Token': token } : {};
+}
+
 async function api(method, path, body) {
-  const opts = { method, credentials: 'same-origin' };
+  const opts = { method, credentials: 'same-origin', headers: csrfHeaders(method) };
   if (body instanceof FormData) {
     opts.body = body;
   } else if (body) {
-    opts.headers = { 'Content-Type': 'application/json' };
+    opts.headers = { ...opts.headers, 'Content-Type': 'application/json' };
     opts.body = JSON.stringify(body);
   }
   const r = await fetch(path, opts);
@@ -905,7 +920,7 @@ function resetChat() {
     </div>`;
 }
 
-$('btn-clear').addEventListener('click', resetChat);
+$('btn-clear').addEventListener('click', () => { resetChat(); S.history = []; });
 
 ta.addEventListener('input', () => {
   ta.style.height = 'auto';
@@ -932,6 +947,7 @@ $('btn-send').addEventListener('click', async () => {
 
   // User bubble
   addUserMsg(q);
+  S.history.push({ role: 'user', content: q });
 
   // Typing indicator (removed as soon as first SSE event arrives)
   const typingEl = addTyping();
@@ -940,11 +956,12 @@ $('btn-send').addEventListener('click', async () => {
     const resp = await fetch('/api/query', {
       method:      'POST',
       credentials: 'same-origin',
-      headers:     { 'Content-Type': 'application/json' },
+      headers:     { 'Content-Type': 'application/json', ...csrfHeaders('POST') },
       body:        JSON.stringify({
         question: q,
         file_ids: Array.from(S.sel),
         mode:     S.mode,
+        history:  S.history,
       }),
     });
 
@@ -1008,6 +1025,10 @@ $('btn-send').addEventListener('click', async () => {
             if (bubble && full) {
               bubble.innerHTML = md(full);  // single markdown pass at the end
             }
+            if (full) {
+              S.history.push({ role: 'assistant', content: full });
+              S.history = S.history.slice(-12);   // keep the last few turns
+            }
             delete S._tokBuf[msgId];
           }
           chatEl.scrollTop = chatEl.scrollHeight;
@@ -1045,16 +1066,19 @@ function _createAssistantMsg(msgId, sources, includeBubble) {
   // Sources section (rendered immediately)
   let srcHtml = '';
   if (sources && sources.length) {
-    const cards = sources.map((s, i) => `
+    const cards = sources.map((s, i) => {
+      const loc = s.location ? `, ${esc(s.location)}` : '';
+      return `
       <div class="src-card">
         <div class="src-hdr" onclick="this.nextElementSibling.classList.toggle('open')">
-          <span class="src-hdr-name">${i+1}. ${esc(s.filename)}</span>
+          <span class="src-hdr-name">${i+1}. ${esc(s.filename)}${loc}</span>
           <span class="src-score">${s.score.toFixed(3)}</span>
         </div>
         <div class="src-body">
           <pre class="src-text">${esc(s.text)}</pre>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
     srcHtml = `<div class="srcs"><div class="srcs-lbl">Retrieved sources</div>${cards}</div>`;
   }
 
