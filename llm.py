@@ -15,6 +15,7 @@ SYSTEM = (
 
 MODEL = "gemini-2.5-flash"
 
+
 def generate(question: str, context: str) -> str:
     prompt = f"Context:\n{context}\n\nQuestion: {question}"
     try:
@@ -29,6 +30,7 @@ def generate(question: str, context: str) -> str:
                 ),
             ),
         )
-        return resp.text
+        # Bug fix: resp.text can be None when the response is blocked or empty
+        return resp.text or "(The model returned an empty or filtered response.)"
     except Exception as e:
         return f"LLM error: {e}"
