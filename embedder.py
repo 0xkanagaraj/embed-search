@@ -3,13 +3,17 @@ embedder.py
 
 Multilingual sentence-transformer embedder.
 
-Model: paraphrase-multilingual-MiniLM-L12-v2
-  - 50+ languages out of the box
-  - 384-dimensional output (same DIM as before — no re-indexing needed
-    IF you switch from all-MiniLM-L6-v2; the vector spaces differ so a
-    full re-index of existing documents is still required after switching)
+Model: intfloat/multilingual-e5-small
+  - 100+ languages
+  - 384-dimensional output (same DIM as the previous MiniLM model, but the
+    vector spaces are NOT compatible — a full re-index of existing
+    documents is required after switching. Delete/rebuild data/index/*)
   - ~470 MB download on first run; cached to ~/.cache/huggingface after that
-  - ~100 ms/query on CPU — negligible vs. LLM latency
+  - E5 models were trained with an instruction-style prefix and need it at
+    inference time too: "query: " for search queries and "passage: " for
+    indexed text. Skipping the prefix measurably hurts retrieval quality,
+    so embed_query()/embed_passages() add it automatically — always use
+    those instead of calling the model directly.
 
 IMPORTANT FIX: removed `import streamlit as st` and `@st.cache_resource`
 that were left over from the Streamlit version. Those would crash the
@@ -25,7 +29,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")   # silence fork warnin
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+MODEL_NAME = "intfloat/multilingual-e5-small"
 DIM = 384
 
 # Module-level singleton — loaded once, reused for every request.
@@ -40,7 +44,7 @@ def _get_model() -> SentenceTransformer:
     return _MODEL
 
 
-def embed(texts: list[str]) -> np.ndarray:
+def _encode(texts: list[str]) -> np.ndarray:
     if not texts:
         return np.zeros((0, DIM), dtype="float32")
     return _get_model().encode(
@@ -51,5 +55,22 @@ def embed(texts: list[str]) -> np.ndarray:
     ).astype("float32")
 
 
+def embed_passages(texts: list[str]) -> np.ndarray:
+    """Embed document chunks for indexing. Adds the required 'passage: ' prefix."""
+    return _encode([f"passage: {t}" for t in texts])
+
+
+def embed_query(text: str) -> np.ndarray:
+    """Embed a single search query. Adds the required 'query: ' prefix."""
+    return _encode([f"query: {text}"])[0]
+
+
+# ── Backwards-compatible aliases (old call sites) ───────────────────
+def embed(texts: list[str]) -> np.ndarray:
+    """Deprecated: use embed_passages(). Kept so nothing breaks silently."""
+    return embed_passages(texts)
+
+
 def embed_one(text: str) -> np.ndarray:
-    return embed([text])[0]
+    """Deprecated: use embed_query()."""
+    return embed_query(text)

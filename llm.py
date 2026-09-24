@@ -33,18 +33,42 @@ _CONFIG = types.GenerateContentConfig(
     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
 )
 
+# How many prior turns (user+assistant pairs) to fold into the prompt for
+# follow-up questions like "what about the second one?". Kept small since
+# every turn re-sends the retrieved context too, and Gemini itself has no
+# memory between our stateless HTTP calls.
+MAX_HISTORY_TURNS = 6
 
-def _prompt(question: str, context: str) -> str:
-    return f"Context:\n{context}\n\nQuestion: {question}"
+
+def _format_history(history: list[dict] | None) -> str:
+    if not history:
+        return ""
+    trimmed = history[-MAX_HISTORY_TURNS:]
+    lines = []
+    for turn in trimmed:
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        content = (turn.get("content") or "").strip()
+        if content:
+            lines.append(f"{role}: {content}")
+    if not lines:
+        return ""
+    return "Prior conversation (for context on follow-up questions):\n" + "\n".join(lines) + "\n\n"
+
+
+def _prompt(question: str, context: str, history: list[dict] | None = None) -> str:
+    return (
+        f"{_format_history(history)}"
+        f"Context:\n{context}\n\nQuestion: {question}"
+    )
 
 
 # ── Blocking ──────────────────────────────────────────────────────
-def generate(question: str, context: str) -> str:
+def generate(question: str, context: str, history: list[dict] | None = None) -> str:
     """Return the complete answer as a single string."""
     try:
         resp = _client.models.generate_content(
             model=MODEL,
-            contents=_prompt(question, context),
+            contents=_prompt(question, context, history),
             config=_CONFIG,
         )
         return resp.text or "(The model returned an empty or filtered response.)"
@@ -53,7 +77,8 @@ def generate(question: str, context: str) -> str:
 
 
 # ── Streaming ─────────────────────────────────────────────────────
-def stream_generate(question: str, context: str) -> Generator[str, None, None]:
+def stream_generate(question: str, context: str,
+                     history: list[dict] | None = None) -> Generator[str, None, None]:
     """
     Yield text tokens as they are produced by the model.
 
@@ -69,7 +94,7 @@ def stream_generate(question: str, context: str) -> Generator[str, None, None]:
     try:
         for chunk in _client.models.generate_content_stream(
             model=MODEL,
-            contents=_prompt(question, context),
+            contents=_prompt(question, context, history),
             config=_CONFIG,
         ):
             text = chunk.text

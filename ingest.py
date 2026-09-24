@@ -2,16 +2,22 @@
 ingest.py — text extraction for all supported file types.
 
 Supported:
-  .pdf                     — text layer, OCR fallback
-  .txt / .md               — plain text
-  .docx / .doc             — Word documents   (requires: python-docx)
-  .xlsx / .xls             — Excel sheets     (requires: openpyxl)
-  .pptx / .ppt             — PowerPoint       (requires: python-pptx)
-  .csv                     — comma-separated  (stdlib)
-  .html / .htm             — web pages        (stdlib)
+  .pdf                      — text layer, OCR fallback
+  .txt / .md                — plain text
+  .docx / .doc               — Word documents   (requires: python-docx)
+  .xlsx / .xls               — Excel sheets     (requires: openpyxl)
+  .pptx / .ppt               — PowerPoint       (requires: python-pptx)
+  .csv                      — comma-separated  (stdlib)
+  .html / .htm               — web pages        (stdlib)
 
-All extractors strip noise (empty lines, header/footer artefacts) and
-return a single cleaned string that the chunker then splits.
+Extraction is location-aware: instead of collapsing a whole document into
+one string, each extractor returns a list of (location, text) *segments*
+— one per PDF page, PPTX slide, or XLSX sheet, where that concept exists
+for the format. The chunker then chunks each segment independently and
+tags every chunk with its segment's location, so a chunk can be cited
+back as e.g. "report.pdf, p. 4" instead of just "report.pdf". Formats
+with no natural segment (txt/md/docx/csv/html) get a single segment with
+location=None.
 """
 
 import csv
@@ -22,11 +28,13 @@ from pathlib import Path
 from pypdf import PdfReader
 
 # ── tunables ──────────────────────────────────────────────────────
-OCR_DPI      = 300
-OCR_MIN_CHARS = 50
-OCR_LANG     = "eng"     # tesseract lang; "eng+fra+deu" for multi-language OCR
-CHUNK_WORDS  = 120
-CHUNK_OVERLAP = 30
+OCR_DPI                = 300
+OCR_MIN_CHARS_PER_PAGE = 20     # below this avg chars/page, assume scanned → OCR
+OCR_LANG               = "eng"  # tesseract lang; "eng+fra+deu" for multi-language OCR
+CHUNK_WORDS            = 120
+CHUNK_OVERLAP          = 30
+MAX_CHUNKS_PER_FILE    = 4000   # safety cap so one huge file can't blow up
+                                 # embedding time / memory on a single upload
 
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".txt", ".md",
@@ -38,8 +46,12 @@ SUPPORTED_EXTENSIONS = {
 }
 
 
+class IngestLimitExceeded(Exception):
+    pass
+
+
 # ═══════════════════════════════════════════════════════════════════
-# Per-format extractors
+# Per-format extractors — each returns list[tuple[location, text]]
 # ═══════════════════════════════════════════════════════════════════
 
 def _clean(text: str) -> str:
@@ -65,20 +77,28 @@ def _pdf_ocr(path: str) -> list[str]:
     return [pytesseract.image_to_string(img, lang=OCR_LANG) for img in images]
 
 
-def _extract_pdf(path: str) -> str:
+def _extract_pdf(path: str) -> list[tuple[str, str]]:
     pages = _pdf_text_layer(path)
-    if sum(len(p.strip()) for p in pages) >= OCR_MIN_CHARS:
-        return _clean("\n\n".join(pages))
-    return _clean("\n\n".join(_pdf_ocr(path)))
+    avg_chars = (sum(len(p.strip()) for p in pages) / len(pages)) if pages else 0
+    if avg_chars < OCR_MIN_CHARS_PER_PAGE:
+        # Text layer looks too sparse to be a real digital document
+        # (e.g. a scanned PDF) — fall back to OCR per-page.
+        pages = _pdf_ocr(path)
+    return [
+        (f"p. {i}", _clean(text))
+        for i, text in enumerate(pages, 1)
+        if _clean(text)
+    ]
 
 
 # ── Plain text / Markdown ────────────────────────────────────────
-def _extract_text(path: str) -> str:
-    return _clean(Path(path).read_text(encoding="utf-8", errors="ignore"))
+def _extract_text(path: str) -> list[tuple[str, str]]:
+    text = _clean(Path(path).read_text(encoding="utf-8", errors="ignore"))
+    return [(None, text)] if text else []
 
 
 # ── Word / DOCX ──────────────────────────────────────────────────
-def _extract_docx(path: str) -> str:
+def _extract_docx(path: str) -> list[tuple[str, str]]:
     try:
         from docx import Document  # python-docx
     except ImportError:
@@ -94,46 +114,53 @@ def _extract_docx(path: str) -> str:
             cells = " | ".join(c.text.strip() for c in row.cells if c.text.strip())
             if cells:
                 parts.append(cells)
-    return _clean("\n".join(parts))
+    text = _clean("\n".join(parts))
+    return [(None, text)] if text else []
 
 
 # ── Excel / XLSX ─────────────────────────────────────────────────
-def _extract_xlsx(path: str) -> str:
+def _extract_xlsx(path: str) -> list[tuple[str, str]]:
     try:
         import openpyxl
     except ImportError:
         raise ImportError("pip install openpyxl")
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    parts: list[str] = []
+    segments: list[tuple[str, str]] = []
     for ws in wb.worksheets:
-        parts.append(f"[Sheet: {ws.title}]")
+        parts: list[str] = []
         for row in ws.iter_rows(values_only=True):
             cells = [str(c) if c is not None else "" for c in row]
             row_text = "\t".join(cells).strip()
             if row_text:
                 parts.append(row_text)
+        text = _clean("\n".join(parts))
+        if text:
+            segments.append((f"sheet '{ws.title}'", text))
     wb.close()
-    return _clean("\n".join(parts))
+    return segments
 
 
 # ── PowerPoint / PPTX ────────────────────────────────────────────
-def _extract_pptx(path: str) -> str:
+def _extract_pptx(path: str) -> list[tuple[str, str]]:
     try:
         from pptx import Presentation  # python-pptx
     except ImportError:
         raise ImportError("pip install python-pptx")
     prs = Presentation(path)
-    parts: list[str] = []
+    segments: list[tuple[str, str]] = []
     for i, slide in enumerate(prs.slides, 1):
-        parts.append(f"[Slide {i}]")
+        parts: list[str] = []
         for shape in slide.shapes:
             if hasattr(shape, "text") and shape.text.strip():
                 parts.append(shape.text.strip())
-    return _clean("\n".join(parts))
+        text = _clean("\n".join(parts))
+        if text:
+            segments.append((f"slide {i}", text))
+    return segments
 
 
 # ── CSV ──────────────────────────────────────────────────────────
-def _extract_csv(path: str) -> str:
+def _extract_csv(path: str) -> list[tuple[str, str]]:
     parts: list[str] = []
     with open(path, newline="", encoding="utf-8", errors="ignore") as f:
         reader = csv.reader(f)
@@ -141,7 +168,8 @@ def _extract_csv(path: str) -> str:
             line = "\t".join(row).strip()
             if line:
                 parts.append(line)
-    return _clean("\n".join(parts))
+    text = _clean("\n".join(parts))
+    return [(None, text)] if text else []
 
 
 # ── HTML / HTM ───────────────────────────────────────────────────
@@ -169,18 +197,19 @@ class _HTMLStripper(HTMLParser):
                 self.parts.append(t)
 
 
-def _extract_html(path: str) -> str:
+def _extract_html(path: str) -> list[tuple[str, str]]:
     stripper = _HTMLStripper()
     stripper.feed(Path(path).read_text(encoding="utf-8", errors="ignore"))
-    return _clean("\n".join(stripper.parts))
+    text = _clean("\n".join(stripper.parts))
+    return [(None, text)] if text else []
 
 
 # ═══════════════════════════════════════════════════════════════════
 # Main dispatcher
 # ═══════════════════════════════════════════════════════════════════
 
-def extract(path: str) -> str:
-    """Return raw text from any supported file type."""
+def extract(path: str) -> list[tuple[str, str]]:
+    """Return [(location, text), ...] segments from any supported file type."""
     ext = Path(path).suffix.lower()
     if ext == ".pdf":
         return _extract_pdf(path)
@@ -221,7 +250,21 @@ def chunk_text(
     return out
 
 
-def ingest_file(path: str) -> list[str]:
-    """File path → list of text chunks ready for embedding."""
-    text = extract(path)
-    return chunk_text(text)
+def ingest_file(path: str) -> list[dict]:
+    """
+    File path → list of {"text": str, "location": str | None} chunks
+    ready for embedding, each tagged with where in the source document
+    it came from (page/slide/sheet), when the format has that concept.
+    """
+    segments = extract(path)
+    out: list[dict] = []
+    for location, text in segments:
+        for chunk in chunk_text(text):
+            out.append({"text": chunk, "location": location})
+            if len(out) > MAX_CHUNKS_PER_FILE:
+                raise IngestLimitExceeded(
+                    f"This file produced more than {MAX_CHUNKS_PER_FILE} chunks "
+                    f"(very large document). Split it into smaller files and "
+                    f"upload those instead."
+                )
+    return out
