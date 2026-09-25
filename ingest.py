@@ -70,20 +70,37 @@ def _pdf_text_layer(path: str) -> list[str]:
         return []
 
 
-def _pdf_ocr(path: str) -> list[str]:
+def _pdf_ocr_pages(path: str, page_numbers: list[int]) -> dict[int, str]:
+    """OCR only the given 0-indexed pages, not the whole document."""
     from pdf2image import convert_from_path
     import pytesseract
-    images = convert_from_path(path, dpi=OCR_DPI)
-    return [pytesseract.image_to_string(img, lang=OCR_LANG) for img in images]
+    out: dict[int, str] = {}
+    for i in page_numbers:
+        images = convert_from_path(path, dpi=OCR_DPI, first_page=i + 1, last_page=i + 1)
+        out[i] = pytesseract.image_to_string(images[0], lang=OCR_LANG) if images else ""
+    return out
 
 
 def _extract_pdf(path: str) -> list[tuple[str, str]]:
-    pages = _pdf_text_layer(path)
-    avg_chars = (sum(len(p.strip()) for p in pages) / len(pages)) if pages else 0
-    if avg_chars < OCR_MIN_CHARS_PER_PAGE:
-        # Text layer looks too sparse to be a real digital document
-        # (e.g. a scanned PDF) — fall back to OCR per-page.
-        pages = _pdf_ocr(path)
+    text_pages = _pdf_text_layer(path)
+    if not text_pages:
+        return []
+
+    # Decide OCR per-page, not for the whole document — a handful of
+    # image-heavy or oddly-encoded pages shouldn't drag every other page
+    # (which already has a perfectly good text layer) through OCR too,
+    # and we only render+OCR those specific pages, not the whole PDF.
+    sparse_idx = [i for i, p in enumerate(text_pages) if len(p.strip()) < OCR_MIN_CHARS_PER_PAGE]
+
+    pages = list(text_pages)
+    if sparse_idx:
+        print(f"⏳  OCR fallback for {len(sparse_idx)}/{len(text_pages)} page(s) "
+              f"in '{path}' (text layer too sparse — scanned page, image-only "
+              f"content, or a font pypdf can't decode)")
+        ocr_pages = _pdf_ocr_pages(path, sparse_idx)
+        for i, text in ocr_pages.items():
+            pages[i] = text
+
     return [
         (f"p. {i}", _clean(text))
         for i, text in enumerate(pages, 1)

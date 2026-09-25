@@ -95,3 +95,27 @@ def test_pdf_extraction_tags_page_number(tmp_path):
     locations = [c["location"] for c in chunks]
     assert "p. 1" in locations
     assert "p. 2" in locations
+
+
+def test_pdf_ocr_only_hits_sparse_pages(monkeypatch):
+    """A document with one good text page and one sparse/undecoded page
+    should only send the sparse page through OCR, not the whole doc."""
+    import ingest
+
+    def fake_text_layer(path):
+        return ["Plenty of real text here, well over twenty characters.", ""]
+
+    calls = {}
+
+    def fake_ocr_pages(path, page_numbers):
+        calls["page_numbers"] = page_numbers
+        return {i: "OCR recovered text" for i in page_numbers}
+
+    monkeypatch.setattr(ingest, "_pdf_text_layer", fake_text_layer)
+    monkeypatch.setattr(ingest, "_pdf_ocr_pages", fake_ocr_pages)
+
+    result = ingest._extract_pdf("fake.pdf")
+
+    assert calls["page_numbers"] == [1]   # only the sparse (0-indexed) page
+    assert result[0] == ("p. 1", "Plenty of real text here, well over twenty characters.")
+    assert result[1] == ("p. 2", "OCR recovered text")
