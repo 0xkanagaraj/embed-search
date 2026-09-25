@@ -4,7 +4,7 @@ uvicorn[standard]
 python-multipart          # multipart file upload support for FastAPI
 
 # ── Document extraction ───────────────────────────────────────────
-pypdf                     # PDF text layer
+pymupdf                   # PDF text layer (fitz) — faster & more robust than pypdf
 pdf2image                 # PDF → image for OCR fallback
 pytesseract               # OCR engine wrapper (tesseract must be installed)
 Pillow                    # image handling

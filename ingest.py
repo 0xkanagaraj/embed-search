@@ -21,16 +21,31 @@ location=None.
 """
 
 import csv
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
 
-from pypdf import PdfReader
+import fitz  # PyMuPDF — faster and more robust text-layer extraction than
+             # pypdf/pdfminer, especially on PDFs with subset/CID-keyed fonts
+             # that pypdf sometimes returns near-empty text for (which used to
+             # false-trigger the OCR fallback below on documents that actually
+             # had a perfectly good text layer).
 
 # ── tunables ──────────────────────────────────────────────────────
-OCR_DPI                = 300
-OCR_MIN_CHARS_PER_PAGE = 20     # below this avg chars/page, assume scanned → OCR
+OCR_DPI                = 200    # was 300: Tesseract accuracy plateaus well
+                                 # below 300 DPI for normal printed text, and
+                                 # rendering/OCR cost scales with pixel count
+                                 # (~DPI²), so this alone is a meaningful win
+                                 # whenever OCR genuinely has to run.
+OCR_MIN_CHARS_PER_PAGE = 20     # below this chars on a page, assume scanned → OCR
 OCR_LANG               = "eng"  # tesseract lang; "eng+fra+deu" for multi-language OCR
+OCR_MAX_WORKERS        = min(os.cpu_count() or 4, 8)
+                                 # pytesseract shells out to the tesseract
+                                 # binary and blocks on subprocess I/O, so it
+                                 # releases the GIL — threads (not processes)
+                                 # give real parallelism here.
 CHUNK_WORDS            = 120
 CHUNK_OVERLAP          = 30
 MAX_CHUNKS_PER_FILE    = 4000   # safety cap so one huge file can't blow up
@@ -64,21 +79,32 @@ def _clean(text: str) -> str:
 # ── PDF ──────────────────────────────────────────────────────────
 def _pdf_text_layer(path: str) -> list[str]:
     try:
-        reader = PdfReader(path)
-        return [page.extract_text() or "" for page in reader.pages]
+        with fitz.open(path) as doc:
+            return [page.get_text() or "" for page in doc]
     except Exception:
         return []
 
 
-def _pdf_ocr_pages(path: str, page_numbers: list[int]) -> dict[int, str]:
-    """OCR only the given 0-indexed pages, not the whole document."""
+def _ocr_one_page(path: str, page_index: int) -> str:
+    """Render a single page at OCR_DPI and OCR it. Runs in a worker thread —
+    both convert_from_path (poppler subprocess) and pytesseract (tesseract
+    subprocess) release the GIL while waiting on the external process, so
+    multiple pages genuinely OCR in parallel rather than time-slicing."""
     from pdf2image import convert_from_path
     import pytesseract
-    out: dict[int, str] = {}
-    for i in page_numbers:
-        images = convert_from_path(path, dpi=OCR_DPI, first_page=i + 1, last_page=i + 1)
-        out[i] = pytesseract.image_to_string(images[0], lang=OCR_LANG) if images else ""
-    return out
+    images = convert_from_path(path, dpi=OCR_DPI, first_page=page_index + 1, last_page=page_index + 1)
+    return pytesseract.image_to_string(images[0], lang=OCR_LANG) if images else ""
+
+
+def _pdf_ocr_pages(path: str, page_numbers: list[int]) -> dict[int, str]:
+    """OCR only the given 0-indexed pages, not the whole document, and do
+    it across multiple pages at once instead of one at a time."""
+    if not page_numbers:
+        return {}
+    workers = min(OCR_MAX_WORKERS, len(page_numbers))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = pool.map(lambda i: (i, _ocr_one_page(path, i)), page_numbers)
+        return dict(results)
 
 
 def _extract_pdf(path: str) -> list[tuple[str, str]]:
@@ -96,7 +122,7 @@ def _extract_pdf(path: str) -> list[tuple[str, str]]:
     if sparse_idx:
         print(f"⏳  OCR fallback for {len(sparse_idx)}/{len(text_pages)} page(s) "
               f"in '{path}' (text layer too sparse — scanned page, image-only "
-              f"content, or a font pypdf can't decode)")
+              f"content, or a font the PDF parser can't decode)")
         ocr_pages = _pdf_ocr_pages(path, sparse_idx)
         for i, text in ocr_pages.items():
             pages[i] = text
