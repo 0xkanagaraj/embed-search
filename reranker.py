@@ -13,6 +13,7 @@ network on first run, or intentionally disabled), rerank() returns the
 input order unchanged rather than breaking search.
 """
 
+import math
 import os
 
 RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # multilingual
@@ -51,6 +52,12 @@ def rerank(query: str, hits: list[dict], top_k: int) -> list[dict]:
     pairs = [(query, h["text"]) for h in hits]
     scores = model.predict(pairs)
     for h, s in zip(hits, scores):
-        h["rerank_score"] = float(s)
-    hits.sort(key=lambda h: h["rerank_score"], reverse=True)
+        s_val = float(s)
+        # Sigmoid maps unbounded logits to clean [0, 1] probability
+        prob = 1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, s_val))))
+        h["raw_rerank_score"] = s_val
+        h["rerank_score"] = prob
+        h["score"] = prob  # Set primary score so UI displays the metric used to rank
+    hits.sort(key=lambda h: h["score"], reverse=True)
     return hits[:top_k]
+

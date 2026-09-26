@@ -3,7 +3,10 @@ import sqlite3
 import time
 from pathlib import Path
 
-DB_PATH = Path("data/users.db")
+# Anchor to the directory containing this file so the DB is found regardless
+# of what working directory the server process was launched from.
+_HERE    = Path(__file__).parent
+DB_PATH  = _HERE / "data" / "users.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 SESSION_TTL_SECONDS = 86_400 * 7   # 7 days, matches the old cookie max_age
@@ -111,6 +114,12 @@ def delete_file(username: str, file_id: int):
     with _conn() as c:
         c.execute("DELETE FROM files WHERE username = ? AND id = ?",
                   (username, file_id))
+
+
+def update_file_chunks(file_id: int, n_chunks: int) -> None:
+    with _conn() as c:
+        c.execute("UPDATE files SET n_chunks = ? WHERE id = ?", (n_chunks, file_id))
+
 
 
 # ── Sessions ──────────────────────────────────────────────────────

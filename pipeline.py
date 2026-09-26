@@ -29,8 +29,8 @@ def index_file(username: str, file_id: int, filename: str, path: str) -> int:
     return len(pieces)
 
 
-def remove_file(username: str, file_id: int):
-    store.remove_file(username, file_id)
+def remove_file(username: str, file_id: int, filename: str | None = None):
+    store.remove_file(username, file_id, filename)
 
 
 def retrieve(username: str,
@@ -42,6 +42,8 @@ def retrieve(username: str,
     from the user's store, then re-rank down to the final top-k with the
     cross-encoder (when available; otherwise the hybrid order stands).
     """
+    if file_ids is not None and len(file_ids) == 0:
+        return []
     qv = embed_query(query)
     candidates = store.search(username, qv, query_text=query, file_ids=file_ids, k=k)
     return rerank(query, candidates, k)

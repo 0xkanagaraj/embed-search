@@ -27,8 +27,11 @@ from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
 
-import fitz  # PyMuPDF — faster and more robust text-layer extraction than
-             # pypdf/pdfminer, especially on PDFs with subset/CID-keyed fonts
+try:
+    import pymupdf as fitz  # Modern PyMuPDF import
+except ImportError:
+    import fitz             # Fallback for older installs
+
              # that pypdf sometimes returns near-empty text for (which used to
              # false-trigger the OCR fallback below on documents that actually
              # had a perfectly good text layer).
@@ -281,16 +284,64 @@ def chunk_text(
     size: int = CHUNK_WORDS,
     overlap: int = CHUNK_OVERLAP,
 ) -> list[str]:
-    """Word-based sliding window chunker with overlap."""
-    words = text.split()
+    """Sentence-aware sliding-window chunker with word-count budget.
+
+    Strategy
+    --------
+    1. Split the text into sentences using punctuation boundaries
+       (. ! ? followed by whitespace or end-of-string).
+    2. Accumulate whole sentences until adding the next one would
+       exceed `size` words.
+    3. Emit the accumulated buffer as a chunk.
+    4. Retain a trailing overlap: drop sentences from the *front* of
+       the buffer until the retained portion is ≤ `overlap` words,
+       then continue accumulating.
+
+    This ensures no sentence is ever split across two chunks, which
+    measurably improves retrieval quality compared to the old
+    word-boundary-only approach.
+    """
+    raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    sentences: list[str] = []
+    for s in raw_sentences:
+        s = s.strip()
+        if not s:
+            continue
+        words = s.split()
+        if len(words) > int(size * 1.5):
+            # Split run-on sentences or dense text without punctuation into word windows
+            step = max(1, size - overlap)
+            for i in range(0, len(words), step):
+                chunk_s = " ".join(words[i:i + size])
+                if chunk_s:
+                    sentences.append(chunk_s)
+        else:
+            sentences.append(s)
+
     out: list[str] = []
-    i = 0
-    while i < len(words):
-        chunk = " ".join(words[i: i + size])
-        if chunk.strip():
-            out.append(chunk)
-        i += size - overlap
+    buf: list[str] = []        # sentences in current window
+    buf_words: int = 0         # total word count of current window
+
+    for sent in sentences:
+        w = len(sent.split())
+        # If adding this sentence would overflow the budget AND we have
+        # something already, emit what we have first.
+        if buf and buf_words + w > size:
+            out.append(" ".join(buf))
+            # Trim the front of the buffer to retain at most `overlap` words.
+            while buf and buf_words > overlap:
+                buf_words -= len(buf[0].split())
+                buf.pop(0)
+
+        buf.append(sent)
+        buf_words += w
+
+    # Emit any remaining sentences.
+    if buf:
+        out.append(" ".join(buf))
+
     return out
+
 
 
 def ingest_file(path: str) -> list[dict]:

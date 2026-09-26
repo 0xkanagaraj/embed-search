@@ -74,8 +74,10 @@ _CACHE: dict[str, tuple[list[dict], np.ndarray, object, float]] = {}
 
 
 # ── Paths ─────────────────────────────────────────────────────────
+_HERE = Path(__file__).parent
+
 def store_dir(username: str) -> Path:
-    d = Path("data/index") / username
+    d = _HERE / "data" / "index" / username
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -177,16 +179,31 @@ def append(username: str, new_chunks: list[dict], new_vectors: np.ndarray) -> No
     save(username, chunks, vectors)
 
 
-def remove_file(username: str, file_id: int) -> None:
+def remove_file(username: str, file_id: int, filename: Optional[str] = None) -> None:
     # Deleting a file doesn't depend on vector-space compatibility, so it
     # should work even while an index is mid-migration to a new model.
     chunks, vectors, _ = load(username, check_model=False)
     if not chunks:
         return
-    keep   = np.array([c["file_id"] != file_id for c in chunks])
+    fid_int = int(file_id) if file_id is not None else None
+    keep = []
+    for c in chunks:
+        c_fid = int(c.get("file_id", -1))
+        c_fn = c.get("filename")
+        if fid_int is not None and c_fid == fid_int:
+            keep.append(False)
+        elif filename is not None and c_fn == filename:
+            keep.append(False)
+        else:
+            keep.append(True)
+    keep_arr = np.array(keep, dtype=bool)
+    if len(vectors) == len(chunks):
+        new_vectors = vectors[keep_arr] if keep_arr.any() else np.zeros((0, DIM), dtype="float32")
+    else:
+        new_vectors = np.zeros((0, DIM), dtype="float32")
     save(username,
-         [c for c, k in zip(chunks, keep) if k],
-         vectors[keep])
+         [c for c, k in zip(chunks, keep_arr) if k],
+         new_vectors)
 
 
 def _minmax(scores: np.ndarray) -> np.ndarray:
@@ -214,7 +231,9 @@ def search(
         return []
 
     if file_ids is not None:
-        mask = np.array([c["file_id"] in file_ids for c in chunks])
+        if not file_ids:
+            return []
+        mask = np.array([c.get("file_id") in file_ids for c in chunks])
         if not mask.any():
             return []
         idx = np.where(mask)[0]
@@ -239,7 +258,12 @@ def search(
     n_candidates = max(k * CANDIDATE_MULTIPLIER, CANDIDATE_MIN)
     top = np.argsort(combined)[::-1][:n_candidates]
     return [
-        {**chunks_f[i], "score": float(vec_scores[i]), "hybrid_score": float(combined[i])}
+        {
+            **chunks_f[i],
+            "score": float(combined[i]),
+            "vec_score": float(vec_scores[i]),
+            "hybrid_score": float(combined[i]),
+        }
         for i in top
     ]
 

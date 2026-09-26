@@ -24,48 +24,38 @@
   }
   *{ box-sizing:border-box; }
   html,body{
-    height:100%;
+    min-height:100%;
     margin:0;
     background:var(--ink);
     color:var(--text);
     font-family:'Inter',system-ui,sans-serif;
-    overflow:hidden;
+    /* page-level scroll — results grow the page, user scrolls naturally */
+    overflow-y:auto;
+    overflow-x:hidden;
   }
   .mono{ font-family:'IBM Plex Mono', ui-monospace, monospace; }
   button{ font-family:inherit; }
 
-  .app{
-    height:100dvh;
-    width:100vw;
-    display:flex;
-    justify-content:center;
-    padding:20px;
-    padding-top: calc(20px + env(safe-area-inset-top, 0px));
-    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
-  }
-
-  .stage{
-    width:100%;
-    max-width:640px;
-    min-height:0;
-    display:flex;
-    flex-direction:column;
-    gap:12px;
-  }
-
-  /* brand row */
-  .brandrow{
+  /* Top bar: logo pinned top-left, full viewport width */
+  .topbar{
+    position:sticky;
+    top:0;
+    z-index:10;
     display:flex;
     align-items:center;
-    justify-content:space-between;
-    flex-shrink:0;
+    gap:10px;
+    padding:14px 28px;
+    background:rgba(18,21,26,0.88);
+    backdrop-filter:blur(10px);
+    -webkit-backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--border);
   }
+  .brand .mark{ color:var(--accent); flex-shrink:0; }
   .brand{
     display:flex;
     align-items:center;
     gap:8px;
   }
-  .brand .mark{ color:var(--accent); flex-shrink:0; }
   .brand .word{
     font-size:15px;
     font-weight:600;
@@ -73,26 +63,40 @@
     letter-spacing:-.2px;
   }
 
-  /* header label */
-  .label{
+  /* Main content area — full width, generous horizontal padding */
+  .app{
+    width:100%;
+    padding:24px 28px;
+    padding-bottom:60px;
+  }
+
+  .stage{
+    width:100%;
+    display:flex;
+    flex-direction:column;
+    gap:12px;
+  }
+
+  /* live status label in topbar */
+  .toplabel{
     font-family:'IBM Plex Mono',monospace;
     font-size:11px;
     color:var(--text-faint);
     display:flex;
     align-items:center;
     gap:8px;
-    flex-shrink:0;
+    margin-left:16px;
   }
-  .label .dot{
+  .toplabel .dot{
     width:5px; height:5px; border-radius:50%;
     background:var(--score);
     box-shadow:0 0 0 0 rgba(94,234,212,.5);
     animation:pulse 2.2s ease-out infinite;
   }
   @keyframes pulse{
-    0%{ box-shadow:0 0 0 0 rgba(94,234,212,.4); }
-    70%{ box-shadow:0 0 0 5px rgba(94,234,212,0); }
-    100%{ box-shadow:0 0 0 0 rgba(94,234,212,0); }
+    0%  { box-shadow:0 0 0 0   rgba(94,234,212,.4); }
+    70% { box-shadow:0 0 0 5px rgba(94,234,212,0); }
+    100%{ box-shadow:0 0 0 0   rgba(94,234,212,0); }
   }
 
   /* search bar */
@@ -268,16 +272,15 @@
   }
   .addfile:hover{ border-color:var(--accent-dim); color:var(--accent); }
 
-  /* RAG answer box */
+  /* RAG answer box — no inner scroll, grows with content */
   .answerbox{
-    background:linear-gradient(180deg, rgba(138,162,255,0.07), rgba(138,162,255,0.02));
+    background:linear-gradient(180deg, rgba(99,179,237,0.07), rgba(99,179,237,0.02));
     border:1px solid var(--accent-dim);
     border-radius:9px;
-    padding:12px 14px;
-    flex-shrink:0;
+    padding:14px 16px;
     display:none;
     flex-direction:column;
-    gap:6px;
+    gap:8px;
   }
   .answerbox.show{ display:flex; }
   .answerbox .atitle{
@@ -286,10 +289,11 @@
     color:var(--accent);
     letter-spacing:.3px;
     display:flex; align-items:center; gap:6px;
+    flex-shrink:0;
   }
   .answerbox .atext{
     font-size:13px;
-    line-height:1.55;
+    line-height:1.6;
     color:var(--text);
   }
   .answerbox .atext code{
@@ -300,6 +304,7 @@
     font-family:'IBM Plex Mono',monospace;
     font-size:10px;
     color:var(--text-faint);
+    flex-shrink:0;
   }
   .answerbox .acites b{ color:var(--text-dim); font-weight:500; }
 
@@ -322,31 +327,37 @@
   }
   .results-meta .val{ color:var(--text-dim); }
 
+  /* results — no inner scroll, page scrolls naturally */
   .results{
-    flex:1;
-    min-height:0;
     display:flex;
     flex-direction:column;
     gap:2px;
-    overflow-y:auto;
-    scrollbar-width:none;
   }
-  .results::-webkit-scrollbar{ display:none; }
 
+  /* ── Result card ─────────────────────────────────────────── */
   .result{
     display:flex;
     align-items:flex-start;
     gap:12px;
-    padding:10px 4px;
-    border-bottom:1px solid var(--border);
+    padding:10px 8px;
+    border-radius:8px;
+    border:1px solid transparent;
     cursor:pointer;
     opacity:0;
-    animation:rise .4s ease forwards;
+    animation:rise .35s ease forwards;
+    transition:background .15s ease, border-color .15s ease;
   }
-  .result:last-child{ border-bottom:none; }
+  .result:hover{
+    background:var(--panel-2);
+    border-color:var(--border);
+  }
+  .result.expanded{
+    background:var(--panel);
+    border-color:var(--border-soft);
+  }
   @keyframes rise{
     from{ opacity:0; transform:translateY(4px); }
-    to{ opacity:1; transform:translateY(0); }
+    to  { opacity:1; transform:translateY(0); }
   }
   .result-main{ flex:1; min-width:0; }
   .result-title{
@@ -358,6 +369,11 @@
     overflow:hidden;
     text-overflow:ellipsis;
   }
+  .result.expanded .result-title{
+    white-space:normal;
+    overflow:visible;
+    text-overflow:unset;
+  }
   .result-path{
     font-family:'IBM Plex Mono',monospace;
     font-size:10.5px;
@@ -365,17 +381,37 @@
     white-space:nowrap;
     overflow:hidden;
     text-overflow:ellipsis;
+    margin-bottom:2px;
   }
+  /* Snippet: 2-line clamp when collapsed, full text when expanded */
   .result-snippet{
-    font-size:11.5px;
+    font-size:12px;
     color:var(--text-dim);
-    margin-top:4px;
+    margin-top:5px;
+    line-height:1.55;
     display:-webkit-box;
     -webkit-line-clamp:2;
     -webkit-box-orient:vertical;
     overflow:hidden;
-    line-height:1.5;
   }
+  .result.expanded .result-snippet{
+    display:block;
+    overflow:visible;
+    -webkit-line-clamp:unset;
+  }
+  /* Expand/collapse hint shown on hover or when expanded */
+  .result-expand-hint{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:9.5px;
+    color:var(--text-faint);
+    margin-top:5px;
+    display:none;
+  }
+  .result:hover .result-expand-hint,
+  .result.expanded .result-expand-hint{ display:block; }
+  .result.expanded .result-expand-hint::before{ content:'\25B2  collapse'; }
+  .result:not(.expanded) .result-expand-hint::before{ content:'\25BC  expand full text'; }
+
   .score{
     font-family:'IBM Plex Mono',monospace;
     font-size:10.5px;
@@ -397,32 +433,38 @@
     color:var(--text-faint);
     gap:8px;
     padding:20px;
+    min-height:80px;
   }
 
-  @media (max-width:480px){
+  @media (max-width:600px){
+    .topbar{ padding:10px 16px; }
+    .app{ padding:16px; }
     .result-path{ display:none; }
     .control .clabel{ display:none; }
   }
 </style>
 </head>
 <body>
+
+<!-- sticky top bar: logo top-left + live status label -->
+<header class="topbar">
+  <div class="brand">
+    <svg class="mark" width="20" height="20" viewBox="0 0 24 24" fill="none">
+      <circle cx="9"  cy="9"  r="6" fill="currentColor" opacity="0.9"/>
+      <circle cx="16" cy="10" r="5" fill="currentColor" opacity="0.55"/>
+      <circle cx="12" cy="17" r="4" fill="currentColor" opacity="0.3"/>
+    </svg>
+    <span class="word">SemanticSearch</span>
+  </div>
+  <div class="toplabel">
+    <span class="dot"></span>
+    <span id="label-text">semantic search &middot; ready</span>
+  </div>
+</header>
+
+<!-- main content -->
 <div class="app">
   <div class="stage">
-
-    <!-- brand row -->
-    <div class="brandrow">
-      <div class="brand">
-        <svg class="mark" width="20" height="20" viewBox="0 0 24 24" fill="none">
-          <circle cx="9"  cy="9"  r="6" fill="currentColor" opacity="0.9"/>
-          <circle cx="16" cy="10" r="5" fill="currentColor" opacity="0.55"/>
-          <circle cx="12" cy="17" r="4" fill="currentColor" opacity="0.3"/>
-        </svg>
-        <span class="word">SemanticSearch</span>
-      </div>
-    </div>
-
-    <!-- live label -->
-    <div class="label"><span class="dot"></span><span id="label-text">semantic search &middot; ready</span></div>
 
     <!-- search bar -->
     <div class="searchbar">
@@ -643,15 +685,15 @@ async function doSearch() {
   hideAnswer();
   if (S.ragOn) showAnswerLoading();
 
-  const fileIds = S.files.map(f => f.id);  // use all indexed files
-  const mode = S.ragOn ? 'rag' : 'search';
+  const fileIds = S.files.map(f => f.id);
+  const mode    = S.ragOn ? 'rag' : 'search';
 
   try {
     const resp = await fetch('/api/query', {
       method: 'POST',
       credentials: 'same-origin',
       headers: Object.assign({ 'Content-Type': 'application/json' }, csrfHdr()),
-      body: JSON.stringify({ question: q, file_ids: fileIds, mode: mode, history: [] }),
+      body: JSON.stringify({ question: q, file_ids: fileIds, mode: mode, history: [], k: k }),
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
 
@@ -691,9 +733,11 @@ async function doSearch() {
           if (S.ragOn && answerText) {
             $('answerBody').innerHTML = '<div class="atext">' + md(answerText) + '</div>';
             if (sources.length) {
+              // sources.length is exactly k — the server respects the k we sent
+              const uniqueFiles = [...new Set(sources.map(s => s.filename))];
               $('answerCites').innerHTML =
-                'grounded in <b>' + sources.length + '</b> source' + (sources.length !== 1 ? 's' : '') +
-                ' \u2014 ' + sources.map(s => esc(s.filename)).join(', ');
+                'grounded in <b>' + sources.length + '</b> chunk' + (sources.length !== 1 ? 's' : '') +
+                ' from ' + uniqueFiles.map(f => esc(f)).join(', ');
             }
           } else if (!S.ragOn) {
             hideAnswer();
@@ -725,15 +769,28 @@ function renderResults(sources) {
     const div = document.createElement('div');
     div.className = 'result';
     div.style.animationDelay = (i * 55) + 'ms';
-    const snippet = s.text ? esc(s.text.slice(0, 160)) + (s.text.length > 160 ? '\u2026' : '') : '';
-    const loc = s.location ? ' \u00b7 ' + esc(s.location) : '';
+    // Show the FULL chunk text — no artificial truncation
+    const fullText = s.text ? esc(s.text) : '';
+    const loc      = s.location ? ' &middot; ' + esc(s.location) : '';
+    const scoreVal = typeof s.score === 'number' ? s.score.toFixed(2) : '';
+    let scoreTip = '';
+    if (typeof s.raw_rerank_score === 'number') {
+      scoreTip = 'Re-rank relevance: ' + s.score.toFixed(3) + (typeof s.vec_score === 'number' ? ' (Vector cosine: ' + s.vec_score.toFixed(2) + ')' : '');
+    } else if (typeof s.vec_score === 'number') {
+      scoreTip = 'Hybrid score: ' + s.score.toFixed(2) + ' (Vector cosine: ' + s.vec_score.toFixed(2) + ')';
+    }
     div.innerHTML =
       '<div class="result-main">' +
         '<div class="result-title">' + esc(s.filename) + '</div>' +
         '<div class="result-path mono">' + esc(s.filename) + loc + '</div>' +
-        (snippet ? '<div class="result-snippet">' + snippet + '</div>' : '') +
+        (fullText
+          ? '<div class="result-snippet">' + fullText + '</div>' +
+            '<div class="result-expand-hint"></div>'
+          : '') +
       '</div>' +
-      '<div class="score mono">' + (typeof s.score === 'number' ? s.score.toFixed(2) : '') + '</div>';
+      '<div class="score mono"' + (scoreTip ? ' title="' + esc(scoreTip) + '"' : '') + '>' + scoreVal + '</div>';
+    // Toggle expanded class on click to reveal full text
+    div.addEventListener('click', () => div.classList.toggle('expanded'));
     el.appendChild(div);
   });
 }

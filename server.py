@@ -48,8 +48,9 @@ from llm import stream_generate
 from pipeline import build_context, index_file, remove_file, retrieve
 from store import IndexModelMismatch
 
-FILES_ROOT = Path("data/users")
-_UI        = Path(__file__).parent / "ui.html"
+_HERE      = Path(__file__).parent
+FILES_ROOT = _HERE / "data" / "users"
+_UI        = _HERE / "ui.html"
 
 # ── Accepted MIME / extension list for upload validation ──────────
 _ACCEPT_EXTS = SUPPORTED_EXTENSIONS   # e.g. {'.pdf', '.docx', ...}
@@ -64,12 +65,15 @@ SIGNUP_WINDOW_SECS  = 300
 # ── Warmup ────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Pre-load and warm the embedding model before accepting requests."""
-    print("⏳  Loading embedding model …")
+    """Pre-load and warm the embedding and reranker models before accepting requests."""
+    print("⏳  [1/2] Loading embedding model (Bi-Encoder) …")
     from embedder import embed_query
     embed_query("warmup")            # JIT-compile + download weights if needed
+    print("⏳  [2/2] Loading re-ranking model (Cross-Encoder) …")
+    from reranker import _get_model
+    _get_model()
     db.purge_expired_sessions()
-    print("✅  Model ready — server is live at http://localhost:8502")
+    print("✅  All models loaded — server is live at http://localhost:8502")
     yield
     # nothing to clean up on shutdown
 
@@ -244,7 +248,7 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
         dest = root / uf.filename
         dest.write_bytes(content)
         file_id = add_file(user, uf.filename, str(dest), 0)
-        remove_file(user, file_id)                   # clear stale vectors
+        remove_file(user, file_id, uf.filename)      # clear stale vectors by ID or filename
 
         try:
             n = index_file(user, file_id, uf.filename, str(dest))
@@ -261,7 +265,8 @@ async def upload_files(request: Request, files: list[UploadFile] = File(...)):
                        f"(data/index/{user}/) or re-upload all files to rebuild it.",
             )
 
-        add_file(user, uf.filename, str(dest), n)
+        # Update the DB record with the real chunk count now that indexing succeeded.
+        db.update_file_chunks(file_id, n)
         results.append({"filename": uf.filename, "n_chunks": n, "file_id": file_id})
     return results
 
@@ -274,8 +279,11 @@ async def delete_file_route(file_id: int, request: Request):
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     delete_file(user, file_id)
-    Path(f["path"]).unlink(missing_ok=True)
-    remove_file(user, file_id)
+    f_path = Path(f["path"])
+    if not f_path.is_absolute():
+        f_path = _HERE / f_path
+    f_path.unlink(missing_ok=True)
+    remove_file(user, file_id, f.get("filename"))
     return {"ok": True}
 
 @app.get("/api/files/{file_id}/chunks")
@@ -317,6 +325,7 @@ class _QueryBody(BaseModel):
     file_ids: list[int]
     mode:     str                          # "search" | "llm" | "rag"
     history:  list[_HistoryTurn] = []      # prior turns, for follow-up questions
+    k:        int = 5                      # number of chunks to retrieve & display
 
 
 @app.post("/api/query")
@@ -345,19 +354,23 @@ async def query(body: _QueryBody, request: Request):
         hits: list[dict] = []
         t_retrieval_ms = 0.0
         if use_search:
-            t0 = time.perf_counter()
-            try:
-                # retrieve() is sync (numpy) — run in thread pool
-                hits = await loop.run_in_executor(
-                    None,
-                    lambda: retrieve(user, body.question,
-                                     body.file_ids or None, 5),
-                )
-            except IndexModelMismatch as e:
-                yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                return
-            t_retrieval_ms = (time.perf_counter() - t0) * 1000
+            if body.file_ids is not None and len(body.file_ids) == 0:
+                hits = []
+                t_retrieval_ms = 0.0
+            else:
+                t0 = time.perf_counter()
+                try:
+                    # retrieve() is sync (numpy) — run in thread pool
+                    hits = await loop.run_in_executor(
+                        None,
+                        lambda: retrieve(user, body.question,
+                                         body.file_ids, body.k),
+                    )
+                except IndexModelMismatch as e:
+                    yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    return
+                t_retrieval_ms = (time.perf_counter() - t0) * 1000
         yield f"data: {json.dumps({'type': 'sources', 'sources': hits})}\n\n"
 
         # ── Phase 2: LLM streaming ──────────────────────────────
