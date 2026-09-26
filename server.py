@@ -42,7 +42,7 @@ import ratelimit
 import validation
 from auth import login as auth_login
 from auth import signup as auth_signup
-from db import add_file, delete_file, list_files
+from db import add_file, delete_file, list_files, get_user, create_user
 from ingest import SUPPORTED_EXTENSIONS, IngestLimitExceeded
 from llm import stream_generate
 from pipeline import build_context, index_file, remove_file, retrieve
@@ -195,6 +195,24 @@ async def logout(request: Request, response: Response):
     response.delete_cookie("session")
     response.delete_cookie("csrf")
     return {"ok": True}
+
+
+@app.post("/api/auth/guest")
+async def guest_login(response: Response):
+    """Auto-create and log in a shared 'guest' account.
+    Called silently by the UI on load so no login screen is needed."""
+    _GUEST_USER = "guest"
+    _GUEST_PASS = "guestpass"
+    # Create the guest account if it doesn't exist yet
+    if not get_user(_GUEST_USER):
+        from auth import hash_password
+        create_user(_GUEST_USER, hash_password(_GUEST_PASS))
+    token, csrf_token = db.create_session(_GUEST_USER)
+    response.set_cookie("session", token, httponly=True,
+                        samesite="lax", max_age=db.SESSION_TTL_SECONDS)
+    response.set_cookie("csrf", csrf_token, httponly=False,
+                        samesite="lax", max_age=db.SESSION_TTL_SECONDS)
+    return {"user": _GUEST_USER}
 
 
 # ── Files ─────────────────────────────────────────────────────────
