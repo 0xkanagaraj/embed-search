@@ -77,15 +77,11 @@
     gap:12px;
   }
 
-  /* live status label in topbar */
+  /* live status dot — pinned to the far right of the topbar */
   .toplabel{
-    font-family:'IBM Plex Mono',monospace;
-    font-size:11px;
-    color:var(--text-faint);
     display:flex;
     align-items:center;
-    gap:8px;
-    margin-left:16px;
+    margin-left:auto;
   }
   .toplabel .dot{
     width:5px; height:5px; border-radius:50%;
@@ -458,7 +454,6 @@
   </div>
   <div class="toplabel">
     <span class="dot"></span>
-    <span id="label-text">semantic search &middot; ready</span>
   </div>
 </header>
 
@@ -673,7 +668,6 @@ async function doSearch() {
   S.busy = true;
 
   const t0 = performance.now();
-  $('label-text').textContent = 'searching\u2026';
   $('results').innerHTML = '';
   $('resultsMeta').style.display = 'none';
   hideAnswer();
@@ -749,7 +743,6 @@ async function doSearch() {
     hideAnswer();
   } finally {
     S.busy = false;
-    $('label-text').textContent = 'semantic search \u00b7 ready';
   }
 }
 
