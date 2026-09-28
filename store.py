@@ -1,8 +1,8 @@
 """
-store.py — per-user vector + BM25 store with in-memory cache.
+store.py — vector + BM25 store with in-memory cache.
 
 Layout on disk:
-    data/index/<user>/
+    data/index/
         chunks.jsonl      one JSON object per line
         vectors.npy       (N, DIM) float32, L2-normalised
         meta.json         {model, dim, count, updated_at}
@@ -20,11 +20,6 @@ Performance:
     entirely from RAM. Cache is invalidated automatically via mtime
     comparison so it stays correct even if files are written by another
     process.
-
-Thread safety:
-    Python's GIL protects dict reads/writes. Safe for single-process
-    uvicorn. For multi-worker deployments, use Redis or a shared vector
-    DB instead (see README "Scaling beyond one process").
 """
 
 import json
@@ -43,8 +38,10 @@ from embedder import DIM, MODEL_NAME
 VECTOR_WEIGHT = 0.65
 BM25_WEIGHT   = 0.35
 # How many hybrid candidates to hand up to the (optional) reranker.
+# The reranker scores (k × CANDIDATE_MULTIPLIER) candidates, then trims to k.
+# Higher multiplier = better recall at the cost of cross-encoder latency.
 CANDIDATE_MULTIPLIER = 4
-CANDIDATE_MIN = 20
+CANDIDATE_MIN = 10   # minimum pool size even when k is very small (k=1,2)
 
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
 
@@ -53,15 +50,15 @@ class IndexModelMismatch(Exception):
     """Raised when the on-disk index was built with a different embedding
     model than the one currently configured. The vector spaces of two
     different models are not comparable, so results would be meaningless
-    — the caller must re-index (delete data/index/<user>/ and re-upload,
+    — the caller must re-index (delete data/index/ and re-upload,
     or run a migration script) before querying again."""
     def __init__(self, indexed_model: str, current_model: str):
         self.indexed_model = indexed_model
         self.current_model = current_model
         super().__init__(
             f"Index was built with model '{indexed_model}' but the server "
-            f"is now running '{current_model}'. Re-index this user's files "
-            f"before querying (the two models' vectors aren't comparable)."
+            f"is now running '{current_model}'. Delete data/index/ and "
+            f"re-upload your files to rebuild the index."
         )
 
 
@@ -69,37 +66,36 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
-# ── Cache: username → (chunks, vectors, bm25_index, mtime) ─────────
-_CACHE: dict[str, tuple[list[dict], np.ndarray, object, float]] = {}
-
-
 # ── Paths ─────────────────────────────────────────────────────────
-_HERE = Path(__file__).parent
+_HERE      = Path(__file__).parent
+_INDEX_DIR = _HERE / "data" / "index"
 
-def store_dir(username: str) -> Path:
-    d = _HERE / "data" / "index" / username
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def _chunks_path() -> Path:  return _INDEX_DIR / "chunks.jsonl"
+def _vectors_path() -> Path: return _INDEX_DIR / "vectors.npy"
+def _meta_path()   -> Path:  return _INDEX_DIR / "meta.json"
 
-def _chunks_path(u: str) -> Path: return store_dir(u) / "chunks.jsonl"
-def _vectors_path(u: str) -> Path: return store_dir(u) / "vectors.npy"
-def _meta_path(u: str)   -> Path: return store_dir(u) / "meta.json"
+_INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _disk_mtime(username: str) -> float:
-    cp, vp = _chunks_path(username), _vectors_path(username)
+# ── Cache: (chunks, vectors, bm25_index, mtime) ────────────────────
+_CACHE: tuple[list[dict], np.ndarray, object, float] | None = None
+
+
+def _disk_mtime() -> float:
+    cp, vp = _chunks_path(), _vectors_path()
     if not cp.exists() or not vp.exists():
         return 0.0
     return max(cp.stat().st_mtime, vp.stat().st_mtime)
 
 
-def _invalidate(username: str) -> None:
-    """Drop cached data for this user (call after every write)."""
-    _CACHE.pop(username, None)
+def _invalidate() -> None:
+    """Drop the in-memory cache (call after every write)."""
+    global _CACHE
+    _CACHE = None
 
 
 def _build_bm25(chunks: list[dict]):
-    """Build (or skip, if the dependency isn't installed) a BM25 index."""
+    """Build (or skip, if rank_bm25 isn't installed) a BM25 index."""
     if not chunks:
         return None
     try:
@@ -110,9 +106,9 @@ def _build_bm25(chunks: list[dict]):
     return BM25Okapi(tokenized)
 
 
-def _check_model(username: str) -> None:
+def _check_model() -> None:
     """Raise IndexModelMismatch if the on-disk index used a different model."""
-    mp = _meta_path(username)
+    mp = _meta_path()
     if not mp.exists():
         return
     try:
@@ -126,20 +122,18 @@ def _check_model(username: str) -> None:
 
 
 # ── Core I/O ──────────────────────────────────────────────────────
-def load(username: str, check_model: bool = True) -> tuple[list[dict], np.ndarray, object]:
+def load(check_model: bool = True) -> tuple[list[dict], np.ndarray, object]:
+    global _CACHE
     if check_model:
-        _check_model(username)
+        _check_model()
 
-    cp, vp = _chunks_path(username), _vectors_path(username)
+    cp, vp = _chunks_path(), _vectors_path()
     if not cp.exists() or not vp.exists():
         return [], np.zeros((0, DIM), dtype="float32"), None
 
-    mtime = _disk_mtime(username)
-    cached = _CACHE.get(username)
-
-    # Cache hit: same or newer than disk
-    if cached is not None and cached[3] >= mtime:
-        return cached[0], cached[1], cached[2]
+    mtime = _disk_mtime()
+    if _CACHE is not None and _CACHE[3] >= mtime:
+        return _CACHE[0], _CACHE[1], _CACHE[2]
 
     # Cache miss: read from disk and populate cache
     chunks: list[dict] = []
@@ -151,45 +145,44 @@ def load(username: str, check_model: bool = True) -> tuple[list[dict], np.ndarra
 
     vectors = np.load(vp)
     bm25 = _build_bm25(chunks)
-    _CACHE[username] = (chunks, vectors, bm25, mtime)
+    _CACHE = (chunks, vectors, bm25, mtime)
     return chunks, vectors, bm25
 
 
-def save(username: str, chunks: list[dict], vectors: np.ndarray) -> None:
-    with open(_chunks_path(username), "w", encoding="utf-8") as f:
+def save(chunks: list[dict], vectors: np.ndarray) -> None:
+    _INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_chunks_path(), "w", encoding="utf-8") as f:
         for c in chunks:
             f.write(json.dumps(c, ensure_ascii=False) + "\n")
-    np.save(_vectors_path(username), vectors)
-    with open(_meta_path(username), "w") as f:
+    np.save(_vectors_path(), vectors)
+    with open(_meta_path(), "w") as f:
         json.dump({
             "model":      MODEL_NAME,
             "dim":        DIM,
             "count":      len(chunks),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }, f, indent=2)
-
-    _invalidate(username)   # keep cache consistent after every write
+    _invalidate()
 
 
 # ── Public API ────────────────────────────────────────────────────
-def append(username: str, new_chunks: list[dict], new_vectors: np.ndarray) -> None:
-    chunks, vectors, _ = load(username)
+def append(new_chunks: list[dict], new_vectors: np.ndarray) -> None:
+    chunks, vectors, _ = load()
     chunks  = chunks + new_chunks
     vectors = np.vstack([vectors, new_vectors]) if len(vectors) else new_vectors
-    save(username, chunks, vectors)
+    save(chunks, vectors)
 
 
-def remove_file(username: str, file_id: int, filename: Optional[str] = None) -> None:
-    # Deleting a file doesn't depend on vector-space compatibility, so it
-    # should work even while an index is mid-migration to a new model.
-    chunks, vectors, _ = load(username, check_model=False)
+def remove_file(file_id: int, filename: Optional[str] = None) -> None:
+    # Deleting a file doesn't depend on vector-space compatibility.
+    chunks, vectors, _ = load(check_model=False)
     if not chunks:
         return
     fid_int = int(file_id) if file_id is not None else None
     keep = []
     for c in chunks:
         c_fid = int(c.get("file_id", -1))
-        c_fn = c.get("filename")
+        c_fn  = c.get("filename")
         if fid_int is not None and c_fid == fid_int:
             keep.append(False)
         elif filename is not None and c_fn == filename:
@@ -201,9 +194,10 @@ def remove_file(username: str, file_id: int, filename: Optional[str] = None) -> 
         new_vectors = vectors[keep_arr] if keep_arr.any() else np.zeros((0, DIM), dtype="float32")
     else:
         new_vectors = np.zeros((0, DIM), dtype="float32")
-    save(username,
-         [c for c, k in zip(chunks, keep_arr) if k],
-         new_vectors)
+    save(
+        [c for c, k in zip(chunks, keep_arr) if k],
+        new_vectors,
+    )
 
 
 def _minmax(scores: np.ndarray) -> np.ndarray:
@@ -214,7 +208,6 @@ def _minmax(scores: np.ndarray) -> np.ndarray:
 
 
 def search(
-    username:     str,
     query_vector: np.ndarray,
     query_text:   str = "",
     file_ids:     Optional[list[int]] = None,
@@ -226,7 +219,7 @@ def search(
     otherwise) and return the top `k * CANDIDATE_MULTIPLIER` candidates
     for the caller to optionally re-rank down to `k`.
     """
-    chunks, vectors, bm25 = load(username)   # served from RAM after first call
+    chunks, vectors, bm25 = load()   # served from RAM after first call
     if not chunks:
         return []
 
@@ -236,7 +229,7 @@ def search(
         mask = np.array([c.get("file_id") in file_ids for c in chunks])
         if not mask.any():
             return []
-        idx = np.where(mask)[0]
+        idx       = np.where(mask)[0]
         chunks_f  = [chunks[i] for i in idx]
         vectors_f = vectors[idx]
     else:
@@ -248,10 +241,10 @@ def search(
 
     if bm25 is not None and query_text:
         # rank_bm25 scores the whole corpus; slice down to our filtered subset.
-        full_bm25 = np.asarray(bm25.get_scores(_tokenize(query_text)))
+        full_bm25   = np.asarray(bm25.get_scores(_tokenize(query_text)))
         bm25_scores = full_bm25[idx]
-        bm25_norm = _minmax(bm25_scores)
-        combined = VECTOR_WEIGHT * vec_norm + BM25_WEIGHT * bm25_norm
+        bm25_norm   = _minmax(bm25_scores)
+        combined    = VECTOR_WEIGHT * vec_norm + BM25_WEIGHT * bm25_norm
     else:
         combined = vec_scores
 
@@ -260,16 +253,16 @@ def search(
     return [
         {
             **chunks_f[i],
-            "score": float(combined[i]),
-            "vec_score": float(vec_scores[i]),
+            "score":        float(combined[i]),
+            "vec_score":    float(vec_scores[i]),
             "hybrid_score": float(combined[i]),
         }
         for i in top
     ]
 
 
-def stats(username: str) -> dict:
-    p = _meta_path(username)
+def stats() -> dict:
+    p = _meta_path()
     if not p.exists():
         return {"count": 0}
     with open(p) as f:

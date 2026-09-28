@@ -28,13 +28,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 try:
-    import pymupdf as fitz  # Modern PyMuPDF import
+    import pymupdf as fitz  # Modern PyMuPDF (pip install pymupdf)
 except ImportError:
-    import fitz             # Fallback for older installs
+    import fitz             # Fallback for older PyMuPDF installs
 
-             # that pypdf sometimes returns near-empty text for (which used to
-             # false-trigger the OCR fallback below on documents that actually
-             # had a perfectly good text layer).
 
 # ── tunables ──────────────────────────────────────────────────────
 OCR_DPI                = 200    # was 300: Tesseract accuracy plateaus well

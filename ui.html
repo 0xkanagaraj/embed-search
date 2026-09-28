@@ -530,26 +530,17 @@
 <script>
 // ── State ────────────────────────────────────────────────────
 const S = {
-  k:       5,
   ragOn:   true,
   files:   [],      // [{id, filename, n_chunks, uploaded_at}]
   busy:    false,
-  pending: [],
 };
 
 // ── Helpers ──────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
-function getCookie(name) {
-  const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
-  return m ? decodeURIComponent(m[1]) : null;
-}
-function csrfHdr() {
-  const t = getCookie('csrf');
-  return t ? { 'X-CSRF-Token': t } : {};
-}
+function csrfHdr() { return {}; }   // no auth — placeholder kept for api() compat
 async function api(method, path, body) {
-  const opts = { method, credentials: 'same-origin', headers: { ...csrfHdr() } };
+  const opts = { method, credentials: 'same-origin', headers: {} };
   if (body instanceof FormData) {
     opts.body = body;
   } else if (body) {
@@ -574,12 +565,8 @@ function md(s) {
     .replace(/\n/g,            '<br>');
 }
 
-// ── Boot: silent guest session ───────────────────────────────
-(async () => {
-  try { await api('GET', '/api/auth/me'); }
-  catch { try { await api('POST', '/api/auth/guest'); } catch(e) { console.error('Auth failed', e); } }
-  await loadFiles();
-})();
+// ── Boot ─────────────────────────────────────────────────────
+(async () => { await loadFiles(); })();
 
 // ── RAG toggle ───────────────────────────────────────────────
 const ragSwitch = $('ragSwitch');
@@ -611,15 +598,22 @@ fileInput.addEventListener('change', async () => {
   const fd = new FormData();
   chosen.forEach(f => fd.append('files', f));
   try {
-    await api('POST', '/api/files', fd);
+    const uploadRes = await api('POST', '/api/files', fd);
+    // Show a brief upload count toast in the button label
+    const nUploaded = Array.isArray(uploadRes) ? uploadRes.length : 1;
+    addFileBtn.textContent = nUploaded + ' file' + (nUploaded !== 1 ? 's' : '') + ' indexed';
     await loadFiles();
   } catch(e) {
+    // Show the server's error message in the button so user sees what went wrong
+    addFileBtn.textContent = '⚠ ' + (e.message || 'Upload failed');
     console.error('Upload error', e);
   } finally {
     fileInput.value = '';
-    addFileBtn.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg> add files';
-    addFileBtn.disabled = false;
+    setTimeout(() => {
+      addFileBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg> add files';
+      addFileBtn.disabled = false;
+    }, 2500);  // restore button after 2.5 s so error is readable
   }
 });
 
@@ -683,7 +677,7 @@ async function doSearch() {
   $('results').innerHTML = '';
   $('resultsMeta').style.display = 'none';
   hideAnswer();
-  if (S.ragOn) showAnswerLoading();
+  if (S.ragOn && S.files.length) showAnswerLoading();
 
   const fileIds = S.files.map(f => f.id);
   const mode    = S.ragOn ? 'rag' : 'search';
@@ -692,7 +686,7 @@ async function doSearch() {
     const resp = await fetch('/api/query', {
       method: 'POST',
       credentials: 'same-origin',
-      headers: Object.assign({ 'Content-Type': 'application/json' }, csrfHdr()),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: q, file_ids: fileIds, mode: mode, history: [], k: k }),
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -720,9 +714,11 @@ async function doSearch() {
           sources = data.sources || [];
           renderResults(sources);
           const ms = Math.round(performance.now() - t0);
-          $('kEcho').textContent = Math.min(sources.length, k);
+          $('kEcho').textContent = sources.length;
           $('timingEcho').textContent = ms + 'ms';
           $('resultsMeta').style.display = sources.length ? '' : 'none';
+          // If no sources were returned, kill the loading spinner immediately
+          if (!sources.length && S.ragOn) hideAnswer();
         }
         else if (data.type === 'token' && S.ragOn) {
           answerText += data.text;
