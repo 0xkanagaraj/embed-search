@@ -7,8 +7,6 @@ def test_chunk_text_basic_sizes():
     text = " ".join(f"word{i}" for i in range(500))
     chunks = chunk_text(text)
     assert len(chunks[0].split()) == CHUNK_WORDS
-    # sliding window overlap: word at index (size-overlap) of chunk0
-    # should be the first word of chunk1
     assert chunks[0].split()[CHUNK_WORDS - CHUNK_OVERLAP] == chunks[1].split()[0]
 
 
@@ -58,7 +56,6 @@ def test_docx_extraction_and_chunk_location(tmp_path):
 
     chunks = ingest_file(str(path))
     assert chunks
-    # docx has no natural page/slide concept -> location is None
     assert all(c["location"] is None for c in chunks)
 
 
@@ -98,8 +95,6 @@ def test_pdf_extraction_tags_page_number(tmp_path):
 
 
 def test_pdf_ocr_only_hits_sparse_pages(monkeypatch):
-    """A document with one good text page and one sparse/undecoded page
-    should only send the sparse page through OCR, not the whole doc."""
     import ingest
 
     def fake_text_layer(path):
@@ -116,14 +111,12 @@ def test_pdf_ocr_only_hits_sparse_pages(monkeypatch):
 
     result = ingest._extract_pdf("fake.pdf")
 
-    assert calls["page_numbers"] == [1]   # only the sparse (0-indexed) page
+    assert calls["page_numbers"] == [1]
     assert result[0] == ("p. 1", "Plenty of real text here, well over twenty characters.")
     assert result[1] == ("p. 2", "OCR recovered text")
 
 
 def test_html_with_meta_and_link_tags_is_extracted(tmp_path):
-    """Regression: void tags (<meta>, <link>) used to leave the skip counter
-    stuck, so every page with a normal <head> extracted to nothing."""
     p = tmp_path / "page.html"
     p.write_text(
         '<html><head><meta charset="utf-8"><title>T</title>'

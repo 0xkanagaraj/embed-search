@@ -1,4 +1,3 @@
-"""End-to-end API tests with the heavy models faked out (no downloads, no network)."""
 import json
 
 import numpy as np
@@ -25,7 +24,7 @@ def client(isolated_db, isolated_store, tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "embed_query", _vec)
     monkeypatch.setattr(reranker, "RERANK_ENABLED", False)
     monkeypatch.setattr(server, "stream_generate", lambda q, ctx, hist: iter(["Hello ", "world"]))
-    return TestClient(server.app)   # not used as a context manager → lifespan (model loading) is skipped
+    return TestClient(server.app)
 
 
 def _events(resp) -> list[dict]:
@@ -60,12 +59,10 @@ def test_reupload_replaces_instead_of_duplicating(client):
 
 def test_upload_rejects_bad_files_and_leaves_no_orphans(client, tmp_path):
     assert _upload(client, "x.exe", b"MZ").status_code == 400
-    assert _upload(client, "x.doc", b"junk").status_code == 400          # legacy format unsupported
+    assert _upload(client, "x.doc", b"junk").status_code == 400
     assert _upload(client, "empty.txt", b"").status_code == 400
-    # a corrupt docx passes the extension check but fails extraction
     r = _upload(client, "broken.docx", b"not really a docx")
     assert r.status_code == 400 and "broken.docx" in r.json()["detail"]
-    # a file with no extractable text
     assert _upload(client, "blank.txt", b"   \n  ").status_code == 400
 
     assert client.get("/api/files").json() == []
@@ -139,3 +136,9 @@ def test_retrieval_error_is_reported_not_crashed(client, monkeypatch):
     ev = _events(client.post("/api/query", json={"question": "x", "file_ids": [1], "mode": "search"}))
     assert ev[0]["type"] == "error" and "exploded" in ev[0]["text"]
     assert ev[-1]["type"] == "done"
+
+
+def test_corrupt_pdf_reports_real_error(client):
+    r = _upload(client, "broken.pdf", b"%PDF-1.4 definitely not a pdf")
+    assert r.status_code == 400 and "Could not read" in r.json()["detail"]
+    assert client.get("/api/files").json() == []

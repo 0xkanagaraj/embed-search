@@ -7,7 +7,6 @@ from embedder import DIM
 
 
 def _fake_vec(seed: int) -> np.ndarray:
-    """Deterministic L2-normalised fake embedding — store only needs the right shape."""
     rng = np.random.default_rng(seed)
     v = rng.normal(size=DIM).astype("float32")
     return v / np.linalg.norm(v)
@@ -75,7 +74,7 @@ def test_remove_file_drops_only_its_chunks(isolated_store):
 def test_remove_file_by_filename_clears_stale_chunks(isolated_store):
     chunks = [{"file_id": 99, "filename": "a.txt", "text": "stale", "location": None}]
     isolated_store.append(chunks, np.stack([_fake_vec(5)]))
-    isolated_store.remove_file(1, "a.txt")   # new id, same filename
+    isolated_store.remove_file(1, "a.txt")
     assert isolated_store.load(check_model=False)[0] == []
 
 
@@ -83,12 +82,12 @@ def test_remove_file_survives_out_of_sync_index(isolated_store):
     chunks = [{"file_id": 1, "filename": "a.txt", "text": "x", "location": None},
               {"file_id": 2, "filename": "b.txt", "text": "y", "location": None}]
     isolated_store.append(chunks, np.stack([_fake_vec(1), _fake_vec(2)]))
-    np.save(isolated_store._vectors_path(), np.stack([_fake_vec(1)]))   # corrupt: 1 vec, 2 chunks
+    np.save(isolated_store._vectors_path(), np.stack([_fake_vec(1)]))
     isolated_store._invalidate()
 
     isolated_store.remove_file(2)
     chunks_after, vectors_after, _ = isolated_store.load(check_model=False)
-    assert len(chunks_after) == len(vectors_after)   # never left inconsistent
+    assert len(chunks_after) == len(vectors_after)
 
 
 def test_model_mismatch_raises_on_search(isolated_store):

@@ -1,8 +1,3 @@
-"""
-pipeline.py — orchestrates ingestion and retrieval.
-The only module that talks to both ingest+embedder (ingestion side)
-and store+embedder (retrieval side).
-"""
 from ingest import ingest_file
 from embedder import embed_passages, embed_query
 from reranker import rerank
@@ -10,8 +5,7 @@ import store
 
 
 def index_file(file_id: int, filename: str, path: str) -> int:
-    """Chunk + embed + append to the store. Returns chunk count."""
-    pieces = ingest_file(path)   # [{text, location}, ...]
+    pieces = ingest_file(path)
     if not pieces:
         return 0
 
@@ -39,11 +33,6 @@ def retrieve(
     file_ids: list[int] | None = None,
     k:        int = 5,
 ) -> list[dict]:
-    """
-    Embed the query, pull a wider hybrid (vector + BM25) candidate set,
-    then re-rank down to the final top-k with the cross-encoder (when
-    available; otherwise the hybrid order stands).
-    """
     if file_ids is not None and len(file_ids) == 0:
         return []
     qv         = embed_query(query)
@@ -56,8 +45,6 @@ def _cite(h: dict) -> str:
 
 
 def build_context(hits: list[dict]) -> str:
-    """Format retrieved chunks into a context block for the LLM, citing
-    filename + page/slide/sheet where available."""
     return "\n\n---\n\n".join(
         f"[{_cite(h)}]\n{h['text']}" for h in hits
     )

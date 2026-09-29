@@ -29,14 +29,13 @@
     background:var(--ink);
     color:var(--text);
     font-family:'Inter',system-ui,sans-serif;
-    /* page-level scroll — results grow the page, user scrolls naturally */
+
     overflow-y:auto;
     overflow-x:hidden;
   }
   .mono{ font-family:'IBM Plex Mono', ui-monospace, monospace; }
   button{ font-family:inherit; }
 
-  /* Top bar: logo pinned top-left, full viewport width */
   .topbar{
     position:sticky;
     top:0;
@@ -63,7 +62,6 @@
     letter-spacing:-.2px;
   }
 
-  /* Main content area — full width, generous horizontal padding */
   .app{
     width:100%;
     padding:24px 28px;
@@ -77,7 +75,6 @@
     gap:12px;
   }
 
-  /* live status dot — pinned to the far right of the topbar */
   .toplabel{
     display:flex;
     align-items:center;
@@ -95,7 +92,6 @@
     100%{ box-shadow:0 0 0 0   rgba(94,234,212,0); }
   }
 
-  /* search bar */
   .searchbar{
     display:flex;
     align-items:center;
@@ -133,7 +129,6 @@
     flex-shrink:0;
   }
 
-  /* controls row */
   .controls{
     display:flex;
     align-items:center;
@@ -205,7 +200,6 @@
 
   .controls-right{ margin-left:auto; }
 
-  /* file dock */
   .filedock{
     display:flex;
     align-items:center;
@@ -268,7 +262,6 @@
   }
   .addfile:hover{ border-color:var(--accent-dim); color:var(--accent); }
 
-  /* RAG answer box — no inner scroll, grows with content */
   .answerbox{
     background:linear-gradient(180deg, rgba(99,179,237,0.07), rgba(99,179,237,0.02));
     border:1px solid var(--accent-dim);
@@ -304,14 +297,12 @@
   }
   .answerbox .acites b{ color:var(--text-dim); font-weight:500; }
 
-  /* streaming dots inside answer */
   .adots{ display:flex; gap:4px; align-items:center; }
   .adot { width:5px; height:5px; background:var(--accent-dim); border-radius:50%; animation:bob 1.1s ease-in-out infinite; }
   .adot:nth-child(2){ animation-delay:.15s; }
   .adot:nth-child(3){ animation-delay:.30s; }
   @keyframes bob{ 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
 
-  /* results meta */
   .results-meta{
     display:flex;
     align-items:baseline;
@@ -323,14 +314,12 @@
   }
   .results-meta .val{ color:var(--text-dim); }
 
-  /* results — no inner scroll, page scrolls naturally */
   .results{
     display:flex;
     flex-direction:column;
     gap:2px;
   }
 
-  /* ── Result card ─────────────────────────────────────────── */
   .result{
     display:flex;
     align-items:flex-start;
@@ -379,7 +368,7 @@
     text-overflow:ellipsis;
     margin-bottom:2px;
   }
-  /* Snippet: 2-line clamp when collapsed, full text when expanded */
+
   .result-snippet{
     font-size:12px;
     color:var(--text-dim);
@@ -395,7 +384,7 @@
     overflow:visible;
     -webkit-line-clamp:unset;
   }
-  /* Expand/collapse hint shown on hover or when expanded */
+
   .result-expand-hint{
     font-family:'IBM Plex Mono',monospace;
     font-size:9.5px;
@@ -418,7 +407,6 @@
     padding-top:2px;
   }
 
-  /* empty / status */
   .empty-msg{
     flex:1;
     display:flex; flex-direction:column;
@@ -442,7 +430,6 @@
 </head>
 <body>
 
-<!-- sticky top bar: logo top-left + live status label -->
 <header class="topbar">
   <div class="brand">
     <svg class="mark" width="20" height="20" viewBox="0 0 24 24" fill="none">
@@ -457,11 +444,9 @@
   </div>
 </header>
 
-<!-- main content -->
 <div class="app">
   <div class="stage">
 
-    <!-- search bar -->
     <div class="searchbar">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
@@ -470,7 +455,6 @@
       <span class="kbd mono">&#x23CE; Enter</span>
     </div>
 
-    <!-- controls row -->
     <div class="controls">
       <div class="control">
         <button class="switch on" id="ragSwitch" role="switch" aria-checked="true"><span class="knob"></span></button>
@@ -489,7 +473,6 @@
       </div>
     </div>
 
-    <!-- file dock -->
     <div class="filedock" id="filedock">
       <button class="addfile" id="addFileBtn">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -498,7 +481,6 @@
     </div>
     <input type="file" id="fileInput" multiple accept=".pdf,.txt,.md,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.csv,.html,.htm" style="display:none">
 
-    <!-- RAG answer box -->
     <div class="answerbox" id="answerBox">
       <div class="atitle">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/></svg>
@@ -508,13 +490,11 @@
       <div class="acites" id="answerCites"></div>
     </div>
 
-    <!-- results meta -->
     <div class="results-meta" id="resultsMeta" style="display:none">
       <span>top <span class="val" id="kEcho">5</span> results</span>
       <span id="timingEcho"></span>
     </div>
 
-    <!-- results -->
     <div class="results" id="results">
       <div class="empty-msg">Add files above, then ask anything.</div>
     </div>
@@ -523,14 +503,12 @@
 </div>
 
 <script>
-// ── State ────────────────────────────────────────────────────
 const S = {
   ragOn:   true,
-  files:   [],      // [{id, filename, n_chunks, uploaded_at}]
+  files:   [],
   busy:    false,
 };
 
-// ── Helpers ──────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
 async function api(method, path, body) {
@@ -559,10 +537,8 @@ function md(s) {
     .replace(/\n/g,            '<br>');
 }
 
-// ── Boot ─────────────────────────────────────────────────────
 (async () => { await loadFiles(); })();
 
-// ── RAG toggle ───────────────────────────────────────────────
 const ragSwitch = $('ragSwitch');
 function setRag(on) {
   S.ragOn = on;
@@ -572,13 +548,11 @@ function setRag(on) {
 }
 ragSwitch.addEventListener('click', () => setRag(!S.ragOn));
 
-// ── k stepper ────────────────────────────────────────────────
 let k = 5;
 const kValEl = $('kVal');
 $('kMinus').addEventListener('click', () => { k = Math.max(1, k - 1); kValEl.textContent = k; });
 $('kPlus').addEventListener('click',  () => { k = Math.min(20, k + 1); kValEl.textContent = k; });
 
-// ── File dock ────────────────────────────────────────────────
 const filedock   = $('filedock');
 const addFileBtn = $('addFileBtn');
 const fileInput  = $('fileInput');
@@ -593,21 +567,19 @@ fileInput.addEventListener('change', async () => {
   chosen.forEach(f => fd.append('files', f));
   try {
     const uploadRes = await api('POST', '/api/files', fd);
-    // Show a brief upload count toast in the button label
     const nUploaded = Array.isArray(uploadRes) ? uploadRes.length : 1;
     addFileBtn.textContent = nUploaded + ' file' + (nUploaded !== 1 ? 's' : '') + ' indexed';
-    await loadFiles();
   } catch(e) {
-    // Show the server's error message in the button so user sees what went wrong
     addFileBtn.textContent = '⚠ ' + (e.message || 'Upload failed');
     console.error('Upload error', e);
   } finally {
+    await loadFiles();
     fileInput.value = '';
     setTimeout(() => {
       addFileBtn.innerHTML =
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg> add files';
       addFileBtn.disabled = false;
-    }, 2500);  // restore button after 2.5 s so error is readable
+    }, 2500);
   }
 });
 
@@ -618,7 +590,6 @@ async function loadFiles() {
 }
 
 function renderChips() {
-  // remove existing chips (not the addFileBtn)
   filedock.querySelectorAll('.chip').forEach(c => c.remove());
 
   S.files.forEach(f => {
@@ -638,11 +609,9 @@ function renderChips() {
     filedock.insertBefore(chip, addFileBtn);
   });
 
-  // update file count label
   const n = S.files.length;
   $('fileCount').textContent = n + ' source' + (n !== 1 ? 's' : '');
 
-  // wire remove buttons
   filedock.querySelectorAll('.rm').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
@@ -653,7 +622,6 @@ function renderChips() {
   });
 }
 
-// ── Search ───────────────────────────────────────────────────
 $('q').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSearch(); }
 });
@@ -710,7 +678,6 @@ async function doSearch() {
           $('kEcho').textContent = sources.length;
           $('timingEcho').textContent = ms + 'ms';
           $('resultsMeta').style.display = sources.length ? '' : 'none';
-          // If no sources were returned, kill the loading spinner immediately
           if (!sources.length && S.ragOn) hideAnswer();
         }
         else if (data.type === 'token' && S.ragOn && !hadError) {
@@ -719,24 +686,23 @@ async function doSearch() {
           $('answerBody').innerHTML = '<div class="atext">' + esc(answerText) + '</div>';
         }
         else if (data.type === 'done') {
-          if (hadError) { /* keep the error message on screen */ }
-          else if (S.ragOn && answerText) {
-            $('answerBody').innerHTML = '<div class="atext">' + md(answerText) + '</div>';
-            if (sources.length) {
-              // sources.length is exactly k — the server respects the k we sent
-              const uniqueFiles = [...new Set(sources.map(s => s.filename))];
-              $('answerCites').innerHTML =
-                'grounded in <b>' + sources.length + '</b> chunk' + (sources.length !== 1 ? 's' : '') +
-                ' from ' + uniqueFiles.map(f => esc(f)).join(', ');
+          if (!hadError) {
+            if (S.ragOn && answerText) {
+              $('answerBody').innerHTML = '<div class="atext">' + md(answerText) + '</div>';
+              if (sources.length) {
+                const uniqueFiles = [...new Set(sources.map(s => s.filename))];
+                $('answerCites').innerHTML =
+                  'grounded in <b>' + sources.length + '</b> chunk' + (sources.length !== 1 ? 's' : '') +
+                  ' from ' + uniqueFiles.map(f => esc(f)).join(', ');
+              }
+            } else if (!S.ragOn) {
+              hideAnswer();
             }
-          } else if (!S.ragOn) {
-            hideAnswer();
           }
         }
         else if (data.type === 'error') {
           hadError = true;
           if (S.ragOn) {
-            // keep any partial answer, append the error under it
             $('answerBox').classList.add('show');
             $('answerBody').innerHTML =
               (answerText ? '<div class="atext">' + md(answerText) + '</div>' : '') +
@@ -768,7 +734,6 @@ function renderResults(sources) {
     const div = document.createElement('div');
     div.className = 'result';
     div.style.animationDelay = (i * 55) + 'ms';
-    // Show the FULL chunk text — no artificial truncation
     const fullText = s.text ? esc(s.text) : '';
     const loc      = s.location ? ' &middot; ' + esc(s.location) : '';
     const scoreVal = typeof s.score === 'number' ? s.score.toFixed(2) : '';
@@ -788,7 +753,6 @@ function renderResults(sources) {
           : '') +
       '</div>' +
       '<div class="score mono"' + (scoreTip ? ' title="' + esc(scoreTip) + '"' : '') + '>' + scoreVal + '</div>';
-    // Toggle expanded class on click to reveal full text
     div.addEventListener('click', () => div.classList.toggle('expanded'));
     el.appendChild(div);
   });

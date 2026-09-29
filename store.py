@@ -1,27 +1,3 @@
-"""
-store.py — vector + BM25 store with in-memory cache.
-
-Layout on disk:
-    data/index/
-        chunks.jsonl      one JSON object per line
-        vectors.npy       (N, DIM) float32, L2-normalised
-        meta.json         {model, dim, count, updated_at}
-
-Retrieval is hybrid: dense cosine similarity (via the embedding model)
-combined with BM25 lexical scoring, so exact keywords/IDs/names that a
-small embedding model might blur are still found. The BM25 index is
-built in memory from chunks.jsonl on load — it's cheap to rebuild and
-keeping it out of the on-disk format avoids a second file to keep in
-sync.
-
-Performance:
-    The first query after startup (or after an index write) reads from
-    disk and rebuilds the BM25 index. Every subsequent query is served
-    entirely from RAM. Cache is invalidated automatically via mtime
-    comparison so it stays correct even if files are written by another
-    process.
-"""
-
 import json
 import re
 import threading
@@ -33,27 +9,15 @@ import numpy as np
 
 from embedder import DIM, MODEL_NAME
 
-# Hybrid scoring weights — vector similarity carries more weight, BM25
-# is there mainly to rescue exact keyword/ID matches a small embedding
-# model can miss.
 VECTOR_WEIGHT = 0.65
 BM25_WEIGHT   = 0.35
-# How many hybrid candidates to hand up to the (optional) reranker.
-# The reranker scores (k × CANDIDATE_MULTIPLIER) candidates, then trims to k.
-# Higher multiplier = better recall at the cost of cross-encoder latency.
-CANDIDATE_MULTIPLIER = 4
-CANDIDATE_MIN = 10   # minimum pool size even when k is very small (k=1,2)
+CANDIDATE_MULTIPLIER = 4   # reranker scores k * this many candidates, then trims to k
+CANDIDATE_MIN = 10
 
-# \w+ is unicode-aware; the embedding model is multilingual, so BM25 must be too.
 _TOKEN_RE = re.compile(r"\w+")
 
 
 class IndexModelMismatch(Exception):
-    """Raised when the on-disk index was built with a different embedding
-    model than the one currently configured. The vector spaces of two
-    different models are not comparable, so results would be meaningless
-    — the caller must re-index (delete data/index/ and re-upload,
-    or run a migration script) before querying again."""
     def __init__(self, indexed_model: str, current_model: str):
         self.indexed_model = indexed_model
         self.current_model = current_model
@@ -68,7 +32,6 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
-# ── Paths ─────────────────────────────────────────────────────────
 _HERE      = Path(__file__).parent
 _INDEX_DIR = _HERE / "data" / "index"
 
@@ -79,12 +42,10 @@ def _meta_path()   -> Path:  return _INDEX_DIR / "meta.json"
 _INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# Serialises read-modify-write cycles (append / remove) so two concurrent
-# uploads can't overwrite each other's chunks.
+# Serialises read-modify-write so concurrent uploads can't overwrite each other's chunks.
 _WRITE_LOCK = threading.RLock()
 
 
-# ── Cache: (chunks, vectors, bm25_index, mtime) ────────────────────
 _CACHE: tuple[list[dict], np.ndarray, object, float] | None = None
 
 
@@ -96,13 +57,11 @@ def _disk_mtime() -> float:
 
 
 def _invalidate() -> None:
-    """Drop the in-memory cache (call after every write)."""
     global _CACHE
     _CACHE = None
 
 
 def _build_bm25(chunks: list[dict]):
-    """Build (or skip, if rank_bm25 isn't installed) a BM25 index."""
     if not chunks:
         return None
     try:
@@ -114,7 +73,6 @@ def _build_bm25(chunks: list[dict]):
 
 
 def _check_model() -> None:
-    """Raise IndexModelMismatch if the on-disk index used a different model."""
     mp = _meta_path()
     if not mp.exists():
         return
@@ -128,7 +86,6 @@ def _check_model() -> None:
         raise IndexModelMismatch(indexed_model, MODEL_NAME)
 
 
-# ── Core I/O ──────────────────────────────────────────────────────
 def load(check_model: bool = True) -> tuple[list[dict], np.ndarray, object]:
     global _CACHE
     if check_model:
@@ -138,11 +95,11 @@ def load(check_model: bool = True) -> tuple[list[dict], np.ndarray, object]:
     if not cp.exists() or not vp.exists():
         return [], np.zeros((0, DIM), dtype="float32"), None
 
+    # Cache is keyed on file mtime, so writes from another process are picked up too.
     mtime = _disk_mtime()
     if _CACHE is not None and _CACHE[3] >= mtime:
         return _CACHE[0], _CACHE[1], _CACHE[2]
 
-    # Cache miss: read from disk and populate cache
     chunks: list[dict] = []
     with open(cp, encoding="utf-8") as f:
         for line in f:
@@ -172,7 +129,6 @@ def save(chunks: list[dict], vectors: np.ndarray) -> None:
     _invalidate()
 
 
-# ── Public API ────────────────────────────────────────────────────
 def append(new_chunks: list[dict], new_vectors: np.ndarray) -> None:
     with _WRITE_LOCK:
         chunks, vectors, _ = load()
@@ -182,9 +138,7 @@ def append(new_chunks: list[dict], new_vectors: np.ndarray) -> None:
 
 
 def remove_file(file_id: int, filename: Optional[str] = None) -> None:
-    """Drop every chunk belonging to `file_id` (or, for stale data, `filename`)."""
     with _WRITE_LOCK:
-        # Deleting a file doesn't depend on vector-space compatibility.
         chunks, vectors, _ = load(check_model=False)
         if not chunks:
             return
@@ -199,10 +153,9 @@ def remove_file(file_id: int, filename: Optional[str] = None) -> None:
             dtype=bool,
         )
         if keep.all():
-            return                       # nothing to remove — skip the rewrite
+            return
         if len(vectors) != len(chunks):
-            # chunks.jsonl and vectors.npy are out of sync (corrupt index).
-            # Never write chunks without matching vectors; reset both.
+            # Corrupt index: reset rather than write chunks without matching vectors.
             save([], np.zeros((0, DIM), dtype="float32"))
             return
         save([c for c, k in zip(chunks, keep) if k], vectors[keep])
@@ -221,13 +174,7 @@ def search(
     file_ids:     Optional[list[int]] = None,
     k:            int = 5,
 ) -> list[dict]:
-    """
-    Hybrid retrieval: combine cosine similarity with BM25 lexical score
-    (when rank_bm25 is installed; falls back to pure vector search
-    otherwise) and return the top `k * CANDIDATE_MULTIPLIER` candidates
-    for the caller to optionally re-rank down to `k`.
-    """
-    chunks, vectors, bm25 = load()   # served from RAM after first call
+    chunks, vectors, bm25 = load()
     if not chunks:
         return []
 
@@ -245,11 +192,10 @@ def search(
         idx = np.arange(len(chunks))
         chunks_f, vectors_f = chunks, vectors
 
-    vec_scores = vectors_f @ query_vector          # cosine (vectors are normalised)
+    vec_scores = vectors_f @ query_vector   # vectors are L2-normalised → dot product = cosine
     vec_norm   = _minmax(vec_scores)
 
     if bm25 is not None and query_text:
-        # rank_bm25 scores the whole corpus; slice down to our filtered subset.
         full_bm25   = np.asarray(bm25.get_scores(_tokenize(query_text)))
         bm25_scores = full_bm25[idx]
         bm25_norm   = _minmax(bm25_scores)

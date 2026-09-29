@@ -1,9 +1,3 @@
-"""
-db.py — SQLite store for file metadata and query stats.
-
-  - files     : uploaded file names, paths, chunk counts
-  - query_log : query count / latency for the /api/stats endpoint
-"""
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,10 +7,9 @@ DB_PATH = _HERE / "data" / "app.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
+# sqlite3's own `with conn:` commits but never closes, hence the wrapper.
 @contextmanager
 def _conn():
-    """Open a connection, commit on success / roll back on error, always close.
-    (sqlite3's own `with conn:` commits but never closes the connection.)"""
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     try:
@@ -50,7 +43,6 @@ def init_db():
         """)
 
 
-# ── Files ─────────────────────────────────────────────────────────
 def add_file(filename: str, path: str, n_chunks: int = 0) -> int:
     with _conn() as c:
         c.execute(
@@ -58,7 +50,7 @@ def add_file(filename: str, path: str, n_chunks: int = 0) -> int:
             "ON CONFLICT(filename) DO UPDATE SET path=excluded.path, n_chunks=excluded.n_chunks",
             (filename, path, n_chunks),
         )
-        # cursor.lastrowid is unreliable after an upsert-update, so always look it up.
+        # cursor.lastrowid is unreliable after an upsert-update, so look the id up.
         row = c.execute("SELECT id FROM files WHERE filename=?", (filename,)).fetchone()
         return row["id"]
 
@@ -81,7 +73,6 @@ def update_file_chunks(file_id: int, n_chunks: int) -> None:
         c.execute("UPDATE files SET n_chunks = ? WHERE id = ?", (n_chunks, file_id))
 
 
-# ── Query log / observability ────────────────────────────────────
 def log_query(mode: str, question_len: int, n_hits: int,
               retrieval_ms: float, total_ms: float) -> None:
     with _conn() as c:

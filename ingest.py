@@ -1,25 +1,3 @@
-"""
-ingest.py — text extraction for all supported file types.
-
-Supported:
-  .pdf                      — text layer, OCR fallback
-  .txt / .md                — plain text
-  .docx                     — Word documents   (requires: python-docx)
-  .xlsx                     — Excel sheets     (requires: openpyxl)
-  .pptx                     — PowerPoint       (requires: python-pptx)
-  .csv                      — comma-separated  (stdlib)
-  .html / .htm               — web pages        (stdlib)
-
-Extraction is location-aware: instead of collapsing a whole document into
-one string, each extractor returns a list of (location, text) *segments*
-— one per PDF page, PPTX slide, or XLSX sheet, where that concept exists
-for the format. The chunker then chunks each segment independently and
-tags every chunk with its segment's location, so a chunk can be cited
-back as e.g. "report.pdf, p. 4" instead of just "report.pdf". Formats
-with no natural segment (txt/md/docx/csv/html) get a single segment with
-location=None.
-"""
-
 import csv
 import os
 import re
@@ -28,32 +6,20 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 try:
-    import pymupdf as fitz  # Modern PyMuPDF (pip install pymupdf)
+    import pymupdf as fitz
 except ImportError:
-    import fitz             # Fallback for older PyMuPDF installs
+    import fitz
 
 
-# ── tunables ──────────────────────────────────────────────────────
-OCR_DPI                = 200    # was 300: Tesseract accuracy plateaus well
-                                 # below 300 DPI for normal printed text, and
-                                 # rendering/OCR cost scales with pixel count
-                                 # (~DPI²), so this alone is a meaningful win
-                                 # whenever OCR genuinely has to run.
-OCR_MIN_CHARS_PER_PAGE = 20     # below this chars on a page, assume scanned → OCR
-OCR_LANG               = "eng"  # tesseract lang; "eng+fra+deu" for multi-language OCR
-OCR_MAX_WORKERS        = min(os.cpu_count() or 4, 8)
-                                 # pytesseract shells out to the tesseract
-                                 # binary and blocks on subprocess I/O, so it
-                                 # releases the GIL — threads (not processes)
-                                 # give real parallelism here.
+OCR_DPI                = 200
+OCR_MIN_CHARS_PER_PAGE = 20
+OCR_LANG               = "eng"
+OCR_MAX_WORKERS        = min(os.cpu_count() or 4, 8)  # threads are enough: OCR waits on subprocesses
 CHUNK_WORDS            = 120
 CHUNK_OVERLAP          = 30
-MAX_CHUNKS_PER_FILE    = 4000   # safety cap so one huge file can't blow up
-                                 # embedding time / memory on a single upload
+MAX_CHUNKS_PER_FILE    = 4000
 
-# Legacy binary .doc/.xls/.ppt are NOT supported: python-docx / openpyxl /
-# python-pptx only read the modern zip-based formats, so accepting those
-# extensions just produced a crash at upload time.
+# Legacy .doc/.xls/.ppt are unsupported: the parsing libraries only read the zip-based formats.
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".txt", ".md",
     ".docx", ".xlsx", ".pptx",
@@ -66,44 +32,29 @@ class IngestLimitExceeded(Exception):
     pass
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Per-format extractors — each returns list[tuple[location, text]]
-# ═══════════════════════════════════════════════════════════════════
-
 def _clean(text: str) -> str:
-    """Collapse whitespace runs and blank lines."""
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-# ── PDF ──────────────────────────────────────────────────────────
 def _pdf_text_layer(path: str) -> list[str]:
-    try:
-        with fitz.open(path) as doc:
-            return [page.get_text() or "" for page in doc]
-    except Exception:
-        return []
+    with fitz.open(path) as doc:
+        return [page.get_text() or "" for page in doc]
 
 
 def _ocr_one_page(path: str, page_index: int) -> str:
-    """Render a single page at OCR_DPI and OCR it. Runs in a worker thread —
-    both convert_from_path (poppler subprocess) and pytesseract (tesseract
-    subprocess) release the GIL while waiting on the external process, so
-    multiple pages genuinely OCR in parallel rather than time-slicing."""
     try:
         from pdf2image import convert_from_path
         import pytesseract
         images = convert_from_path(path, dpi=OCR_DPI, first_page=page_index + 1, last_page=page_index + 1)
         return pytesseract.image_to_string(images[0], lang=OCR_LANG) if images else ""
-    except Exception as e:   # missing tesseract/poppler, bad page, ...
+    except Exception as e:
         print(f"⚠️  OCR failed on page {page_index + 1} of '{path}': {e}")
         return ""
 
 
 def _pdf_ocr_pages(path: str, page_numbers: list[int]) -> dict[int, str]:
-    """OCR only the given 0-indexed pages, not the whole document, and do
-    it across multiple pages at once instead of one at a time."""
     if not page_numbers:
         return {}
     workers = min(OCR_MAX_WORKERS, len(page_numbers))
@@ -117,10 +68,6 @@ def _extract_pdf(path: str) -> list[tuple[str, str]]:
     if not text_pages:
         return []
 
-    # Decide OCR per-page, not for the whole document — a handful of
-    # image-heavy or oddly-encoded pages shouldn't drag every other page
-    # (which already has a perfectly good text layer) through OCR too,
-    # and we only render+OCR those specific pages, not the whole PDF.
     sparse_idx = [i for i, p in enumerate(text_pages) if len(p.strip()) < OCR_MIN_CHARS_PER_PAGE]
 
     pages = list(text_pages)
@@ -139,16 +86,14 @@ def _extract_pdf(path: str) -> list[tuple[str, str]]:
     ]
 
 
-# ── Plain text / Markdown ────────────────────────────────────────
 def _extract_text(path: str) -> list[tuple[str, str]]:
     text = _clean(Path(path).read_text(encoding="utf-8", errors="ignore"))
     return [(None, text)] if text else []
 
 
-# ── Word / DOCX ──────────────────────────────────────────────────
 def _extract_docx(path: str) -> list[tuple[str, str]]:
     try:
-        from docx import Document  # python-docx
+        from docx import Document
     except ImportError:
         raise ImportError("pip install python-docx")
     doc = Document(path)
@@ -166,7 +111,6 @@ def _extract_docx(path: str) -> list[tuple[str, str]]:
     return [(None, text)] if text else []
 
 
-# ── Excel / XLSX ─────────────────────────────────────────────────
 def _extract_xlsx(path: str) -> list[tuple[str, str]]:
     try:
         import openpyxl
@@ -190,10 +134,9 @@ def _extract_xlsx(path: str) -> list[tuple[str, str]]:
     return segments
 
 
-# ── PowerPoint / PPTX ────────────────────────────────────────────
 def _extract_pptx(path: str) -> list[tuple[str, str]]:
     try:
-        from pptx import Presentation  # python-pptx
+        from pptx import Presentation
     except ImportError:
         raise ImportError("pip install python-pptx")
     prs = Presentation(path)
@@ -209,7 +152,6 @@ def _extract_pptx(path: str) -> list[tuple[str, str]]:
     return segments
 
 
-# ── CSV ──────────────────────────────────────────────────────────
 def _extract_csv(path: str) -> list[tuple[str, str]]:
     parts: list[str] = []
     with open(path, newline="", encoding="utf-8", errors="ignore") as f:
@@ -222,10 +164,8 @@ def _extract_csv(path: str) -> list[tuple[str, str]]:
     return [(None, text)] if text else []
 
 
-# ── HTML / HTM ───────────────────────────────────────────────────
 class _HTMLStripper(HTMLParser):
-    # Only paired tags here. Void tags like <meta>/<link> have no end tag, so
-    # listing them would leave the skip counter stuck and drop the whole page.
+    # Paired tags only: void tags like <meta>/<link> never close and would leave the skip counter stuck.
     _SKIP_TAGS = {"script", "style", "head", "noscript", "nav", "footer", "header"}
 
     def __init__(self):
@@ -255,12 +195,7 @@ def _extract_html(path: str) -> list[tuple[str, str]]:
     return [(None, text)] if text else []
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Main dispatcher
-# ═══════════════════════════════════════════════════════════════════
-
 def extract(path: str) -> list[tuple[str, str]]:
-    """Return [(location, text), ...] segments from any supported file type."""
     ext = Path(path).suffix.lower()
     if ext == ".pdf":
         return _extract_pdf(path)
@@ -280,32 +215,11 @@ def extract(path: str) -> list[tuple[str, str]]:
                      f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Chunker
-# ═══════════════════════════════════════════════════════════════════
-
 def chunk_text(
     text: str,
     size: int = CHUNK_WORDS,
     overlap: int = CHUNK_OVERLAP,
 ) -> list[str]:
-    """Sentence-aware sliding-window chunker with word-count budget.
-
-    Strategy
-    --------
-    1. Split the text into sentences using punctuation boundaries
-       (. ! ? followed by whitespace or end-of-string).
-    2. Accumulate whole sentences until adding the next one would
-       exceed `size` words.
-    3. Emit the accumulated buffer as a chunk.
-    4. Retain a trailing overlap: drop sentences from the *front* of
-       the buffer until the retained portion is ≤ `overlap` words,
-       then continue accumulating.
-
-    This ensures no sentence is ever split across two chunks, which
-    measurably improves retrieval quality compared to the old
-    word-boundary-only approach.
-    """
     raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     sentences: list[str] = []
     for s in raw_sentences:
@@ -314,7 +228,6 @@ def chunk_text(
             continue
         words = s.split()
         if len(words) > int(size * 1.5):
-            # Split run-on sentences or dense text without punctuation into word windows
             step = max(1, size - overlap)
             for i in range(0, len(words), step):
                 chunk_s = " ".join(words[i:i + size])
@@ -324,16 +237,13 @@ def chunk_text(
             sentences.append(s)
 
     out: list[str] = []
-    buf: list[str] = []        # sentences in current window
-    buf_words: int = 0         # total word count of current window
+    buf: list[str] = []
+    buf_words: int = 0
 
     for sent in sentences:
         w = len(sent.split())
-        # If adding this sentence would overflow the budget AND we have
-        # something already, emit what we have first.
         if buf and buf_words + w > size:
             out.append(" ".join(buf))
-            # Trim the front of the buffer to retain at most `overlap` words.
             while buf and buf_words > overlap:
                 buf_words -= len(buf[0].split())
                 buf.pop(0)
@@ -341,7 +251,6 @@ def chunk_text(
         buf.append(sent)
         buf_words += w
 
-    # Emit any remaining sentences.
     if buf:
         out.append(" ".join(buf))
 
@@ -349,11 +258,6 @@ def chunk_text(
 
 
 def ingest_file(path: str) -> list[dict]:
-    """
-    File path → list of {"text": str, "location": str | None} chunks
-    ready for embedding, each tagged with where in the source document
-    it came from (page/slide/sheet), when the format has that concept.
-    """
     segments = extract(path)
     out: list[dict] = []
     for location, text in segments:

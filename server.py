@@ -1,20 +1,3 @@
-"""
-server.py — SemanticSearch FastAPI backend (single-user, no auth).
-
-Run:
-    python server.py
-    uvicorn server:app --host 0.0.0.0 --port 8502 --reload
-
-Notes:
-  - Embedding + reranker models are pre-loaded at startup (lifespan hook) so
-    the first query doesn't pay the cold-start penalty.
-  - Heavy work (embedding, OCR, retrieval) never runs on the event loop:
-    blocking routes are plain `def` (FastAPI runs them in a thread pool) and
-    the query route pushes retrieval into an executor. Otherwise one upload
-    would freeze every other request, including live SSE streams.
-  - /api/query streams SSE events: sources first, then LLM tokens.
-"""
-
 import asyncio
 import json
 import math
@@ -42,14 +25,13 @@ _HERE      = Path(__file__).parent
 FILES_ROOT = _HERE / "data" / "files"
 _UI        = _HERE / "ui.html"
 
-# If the LLM produces nothing for this long, give up instead of hanging the stream.
 LLM_IDLE_TIMEOUT_S = 60
 
+# Routes that embed/OCR are plain `def` (run in a thread pool) so they can't freeze the event loop.
 
-# ── Warmup ────────────────────────────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Pre-load and warm the embedding and reranker models before accepting requests."""
     print("⏳  [1/2] Loading embedding model (Bi-Encoder) …")
     embed_query("warmup")
     print("⏳  [2/2] Loading re-ranking model (Cross-Encoder) …")
@@ -61,20 +43,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="SemanticSearch", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
-# ── UI ────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def root():
     return HTMLResponse(_UI.read_text(encoding="utf-8"))
 
 
-# ── Files ─────────────────────────────────────────────────────────
 @app.get("/api/files")
 def get_files():
     return db.list_files()
 
 
 def _discard(file_id: int, filename: str, dest: Path) -> None:
-    """Undo a failed upload: DB row, saved file and any half-written chunks."""
     db.delete_file(file_id)
     dest.unlink(missing_ok=True)
     try:
@@ -88,8 +67,7 @@ def upload_files(files: list[UploadFile] = File(...)):
     FILES_ROOT.mkdir(parents=True, exist_ok=True)
     results = []
     for uf in files:
-        # .name strips any directory part, so "../../x.txt" can't escape FILES_ROOT.
-        filename = Path(uf.filename or "").name
+        filename = Path(uf.filename or "").name   # drops any directory part ("../x")
         ext = Path(filename).suffix.lower()
         if ext not in SUPPORTED_EXTENSIONS:
             raise HTTPException(
@@ -105,7 +83,7 @@ def upload_files(files: list[UploadFile] = File(...)):
         dest = FILES_ROOT / filename
         dest.write_bytes(content)
         file_id = db.add_file(filename, str(dest), 0)
-        remove_file(file_id, filename)   # clear stale chunks if this filename was uploaded before
+        remove_file(file_id, filename)
 
         try:
             n = index_file(file_id, filename, str(dest))
@@ -118,7 +96,7 @@ def upload_files(files: list[UploadFile] = File(...)):
                 status_code=409,
                 detail=f"{e} Delete data/index/ and re-upload all files to rebuild.",
             )
-        except Exception as e:           # corrupt/unreadable file, missing extractor lib, ...
+        except Exception as e:
             _discard(file_id, filename, dest)
             raise HTTPException(status_code=400, detail=f"Could not read '{filename}': {e}")
 
@@ -150,7 +128,6 @@ def delete_file_route(file_id: int):
 
 @app.get("/api/files/{file_id}/chunks")
 def preview_file_chunks(file_id: int):
-    """Preview indexed chunks for one file — lets you verify extraction."""
     if not any(f["id"] == file_id for f in db.list_files()):
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -163,15 +140,8 @@ def preview_file_chunks(file_id: int):
     }
 
 
-# ── Debug ─────────────────────────────────────────────────────────
 @app.get("/api/debug/search")
 def debug_search(q: str, k: int = 5):
-    """
-    Diagnostic endpoint — runs retrieval + rerank and returns the score
-    breakdown so you can sanity-check ranking quality.
-
-        GET /api/debug/search?q=your+query&k=10
-    """
     if not q.strip():
         raise HTTPException(status_code=400, detail="?q= is required")
     k = max(1, min(k, 50))
@@ -234,15 +204,13 @@ def debug_search(q: str, k: int = 5):
     }
 
 
-# ── Stats ─────────────────────────────────────────────────────────
 @app.get("/api/stats")
 def stats():
     return db.stats()
 
 
-# ── Query (SSE streaming) ─────────────────────────────────────────
 class _HistoryTurn(BaseModel):
-    role:    str   # "user" | "assistant"
+    role:    str
     content: str
 
 
@@ -250,8 +218,8 @@ class _QueryBody(BaseModel):
     question: str
     file_ids: list[int]
     mode:     Literal["search", "llm", "rag"]
-    history:  list[_HistoryTurn] = []      # prior turns, for follow-up questions
-    k:        int = 5                      # number of chunks to retrieve & display
+    history:  list[_HistoryTurn] = []
+    k:        int = 5
 
     @field_validator("question")
     @classmethod
@@ -273,13 +241,6 @@ def _sse(payload: dict) -> str:
 
 @app.post("/api/query")
 async def query(body: _QueryBody):
-    """
-    Server-Sent Events stream. Each event is `data: {json}\\n\\n`:
-      {"type": "sources", "sources": [...hits...]}
-      {"type": "token",   "text": "..."}          (0-N times)
-      {"type": "error",   "text": "..."}          (optional)
-      {"type": "done"}                            (always last)
-    """
     use_search = body.mode in ("search", "rag")
     use_llm    = body.mode in ("llm",    "rag")
     loop       = asyncio.get_running_loop()
@@ -287,9 +248,8 @@ async def query(body: _QueryBody):
     history    = [h.model_dump() for h in body.history]
 
     async def event_stream():
-        stop = threading.Event()     # set when the client goes away → stops the LLM thread
+        stop = threading.Event()   # set on client disconnect so the LLM thread stops
         try:
-            # ── Phase 1: Retrieval ──────────────────────────────
             hits: list[dict] = []
             t_retrieval_ms = 0.0
             if use_search and body.file_ids:
@@ -298,16 +258,14 @@ async def query(body: _QueryBody):
                     hits = await loop.run_in_executor(
                         None, lambda: retrieve(body.question, body.file_ids, body.k)
                     )
-                except Exception as e:      # incl. IndexModelMismatch
+                except Exception as e:
                     yield _sse({"type": "error", "text": str(e)})
                     yield _sse({"type": "done"})
                     return
                 t_retrieval_ms = (time.perf_counter() - t0) * 1000
             yield _sse({"type": "sources", "sources": hits})
 
-            # ── Phase 2: LLM streaming ──────────────────────────
             if use_llm and use_search and not hits:
-                # Nothing to ground an answer on — don't spend an LLM call.
                 yield _sse({"type": "token",
                             "text": "I couldn't find anything relevant in the selected files."})
             elif use_llm:
@@ -319,7 +277,7 @@ async def query(body: _QueryBody):
                 def _push(item):
                     try:
                         loop.call_soon_threadsafe(aq.put_nowait, item)
-                    except RuntimeError:    # event loop already closed
+                    except RuntimeError:
                         pass
 
                 def _run_llm():
@@ -359,6 +317,5 @@ async def query(body: _QueryBody):
     )
 
 
-# ── Entry point ───────────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8502, reload=False)
