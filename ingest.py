@@ -4,9 +4,9 @@ ingest.py — text extraction for all supported file types.
 Supported:
   .pdf                      — text layer, OCR fallback
   .txt / .md                — plain text
-  .docx / .doc               — Word documents   (requires: python-docx)
-  .xlsx / .xls               — Excel sheets     (requires: openpyxl)
-  .pptx / .ppt               — PowerPoint       (requires: python-pptx)
+  .docx                     — Word documents   (requires: python-docx)
+  .xlsx                     — Excel sheets     (requires: openpyxl)
+  .pptx                     — PowerPoint       (requires: python-pptx)
   .csv                      — comma-separated  (stdlib)
   .html / .htm               — web pages        (stdlib)
 
@@ -51,11 +51,12 @@ CHUNK_OVERLAP          = 30
 MAX_CHUNKS_PER_FILE    = 4000   # safety cap so one huge file can't blow up
                                  # embedding time / memory on a single upload
 
+# Legacy binary .doc/.xls/.ppt are NOT supported: python-docx / openpyxl /
+# python-pptx only read the modern zip-based formats, so accepting those
+# extensions just produced a crash at upload time.
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".txt", ".md",
-    ".docx", ".doc",
-    ".xlsx", ".xls",
-    ".pptx", ".ppt",
+    ".docx", ".xlsx", ".pptx",
     ".csv",
     ".html", ".htm",
 }
@@ -90,10 +91,14 @@ def _ocr_one_page(path: str, page_index: int) -> str:
     both convert_from_path (poppler subprocess) and pytesseract (tesseract
     subprocess) release the GIL while waiting on the external process, so
     multiple pages genuinely OCR in parallel rather than time-slicing."""
-    from pdf2image import convert_from_path
-    import pytesseract
-    images = convert_from_path(path, dpi=OCR_DPI, first_page=page_index + 1, last_page=page_index + 1)
-    return pytesseract.image_to_string(images[0], lang=OCR_LANG) if images else ""
+    try:
+        from pdf2image import convert_from_path
+        import pytesseract
+        images = convert_from_path(path, dpi=OCR_DPI, first_page=page_index + 1, last_page=page_index + 1)
+        return pytesseract.image_to_string(images[0], lang=OCR_LANG) if images else ""
+    except Exception as e:   # missing tesseract/poppler, bad page, ...
+        print(f"⚠️  OCR failed on page {page_index + 1} of '{path}': {e}")
+        return ""
 
 
 def _pdf_ocr_pages(path: str, page_numbers: list[int]) -> dict[int, str]:
@@ -169,17 +174,19 @@ def _extract_xlsx(path: str) -> list[tuple[str, str]]:
         raise ImportError("pip install openpyxl")
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
     segments: list[tuple[str, str]] = []
-    for ws in wb.worksheets:
-        parts: list[str] = []
-        for row in ws.iter_rows(values_only=True):
-            cells = [str(c) if c is not None else "" for c in row]
-            row_text = "\t".join(cells).strip()
-            if row_text:
-                parts.append(row_text)
-        text = _clean("\n".join(parts))
-        if text:
-            segments.append((f"sheet '{ws.title}'", text))
-    wb.close()
+    try:
+        for ws in wb.worksheets:
+            parts: list[str] = []
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                row_text = "\t".join(cells).strip()
+                if row_text:
+                    parts.append(row_text)
+            text = _clean("\n".join(parts))
+            if text:
+                segments.append((f"sheet '{ws.title}'", text))
+    finally:
+        wb.close()
     return segments
 
 
@@ -217,8 +224,9 @@ def _extract_csv(path: str) -> list[tuple[str, str]]:
 
 # ── HTML / HTM ───────────────────────────────────────────────────
 class _HTMLStripper(HTMLParser):
-    _SKIP_TAGS = {"script", "style", "head", "meta", "link",
-                  "noscript", "nav", "footer", "header"}
+    # Only paired tags here. Void tags like <meta>/<link> have no end tag, so
+    # listing them would leave the skip counter stuck and drop the whole page.
+    _SKIP_TAGS = {"script", "style", "head", "noscript", "nav", "footer", "header"}
 
     def __init__(self):
         super().__init__()
@@ -258,11 +266,11 @@ def extract(path: str) -> list[tuple[str, str]]:
         return _extract_pdf(path)
     if ext in (".txt", ".md"):
         return _extract_text(path)
-    if ext in (".docx", ".doc"):
+    if ext == ".docx":
         return _extract_docx(path)
-    if ext in (".xlsx", ".xls"):
+    if ext == ".xlsx":
         return _extract_xlsx(path)
-    if ext in (".pptx", ".ppt"):
+    if ext == ".pptx":
         return _extract_pptx(path)
     if ext == ".csv":
         return _extract_csv(path)
@@ -338,7 +346,6 @@ def chunk_text(
         out.append(" ".join(buf))
 
     return out
-
 
 
 def ingest_file(path: str) -> list[dict]:

@@ -60,4 +60,3 @@ def rerank(query: str, hits: list[dict], top_k: int) -> list[dict]:
         h["score"] = prob  # Set primary score so UI displays the metric used to rank
     hits.sort(key=lambda h: h["score"], reverse=True)
     return hits[:top_k]
-

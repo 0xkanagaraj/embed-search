@@ -1,59 +1,42 @@
-def test_session_create_get_delete(isolated_db):
+def test_add_list_delete_file(isolated_db):
     db = isolated_db
-    db.create_user("alice", "hashed-pw")
+    fid = db.add_file("a.txt", "/tmp/a.txt", 0)
+    db.update_file_chunks(fid, 7)
 
-    token, csrf = db.create_session("alice")
-    sess = db.get_session(token)
-    assert sess is not None
-    assert sess["username"] == "alice"
-    assert sess["csrf_token"] == csrf
+    files = db.list_files()
+    assert len(files) == 1
+    assert files[0]["id"] == fid
+    assert files[0]["n_chunks"] == 7
 
-    db.delete_session(token)
-    assert db.get_session(token) is None
+    db.delete_file(fid)
+    assert db.list_files() == []
 
 
-def test_session_expiry_and_purge(isolated_db):
+def test_reupload_same_filename_keeps_id(isolated_db):
     db = isolated_db
-    db.create_user("bob", "hashed-pw")
-    token, _ = db.create_session("bob")
-
-    # Force it into the past.
-    with db._conn() as c:
-        c.execute("UPDATE sessions SET expires_at = 0 WHERE token = ?", (token,))
-
-    # An expired session is treated as absent even before an explicit purge.
-    assert db.get_session(token) is None
-
-    db.purge_expired_sessions()
-    with db._conn() as c:
-        row = c.execute(
-            "SELECT COUNT(*) AS n FROM sessions WHERE token = ?", (token,)
-        ).fetchone()
-    assert row["n"] == 0
+    first = db.add_file("a.txt", "/tmp/a.txt", 3)
+    second = db.add_file("a.txt", "/tmp/new/a.txt", 5)
+    assert first == second
+    files = db.list_files()
+    assert len(files) == 1
+    assert files[0]["path"] == "/tmp/new/a.txt"
+    assert files[0]["n_chunks"] == 5
 
 
-def test_unknown_session_token_returns_none(isolated_db):
+def test_query_log_and_stats(isolated_db):
     db = isolated_db
-    assert db.get_session("does-not-exist") is None
+    db.log_query("rag", 20, 5, 120.5, 800.2)
+    db.log_query("search", 10, 3, 90.0, 95.0)
+    db.log_query("rag", 15, 4, 100.0, 700.0)
 
-
-def test_query_log_and_user_stats(isolated_db):
-    db = isolated_db
-    db.create_user("carol", "hashed-pw")
-
-    db.log_query("carol", "rag", 20, 5, 120.5, 800.2)
-    db.log_query("carol", "search", 10, 3, 90.0, 95.0)
-    db.log_query("carol", "rag", 15, 4, 100.0, 700.0)
-
-    stats = db.user_stats("carol")
+    stats = db.stats()
     assert stats["n_queries"] == 3
     assert stats["by_mode"] == {"rag": 2, "search": 1}
     assert stats["avg_hits"] == round((5 + 3 + 4) / 3, 2)
 
 
-def test_user_stats_empty_user(isolated_db):
-    db = isolated_db
-    stats = db.user_stats("nobody")
+def test_stats_when_empty(isolated_db):
+    stats = isolated_db.stats()
     assert stats["n_queries"] == 0
     assert stats["by_mode"] == {}
     assert stats["n_files"] == 0

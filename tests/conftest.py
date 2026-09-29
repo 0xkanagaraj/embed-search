@@ -1,4 +1,3 @@
-import importlib
 import sys
 from pathlib import Path
 
@@ -9,12 +8,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
-    """
-    Run a test against a throwaway SQLite DB + data/ dir instead of the
-    real one. db.py resolves its path relative to the CWD at import time,
-    so we chdir *before* importing/reloading it.
-    """
-    monkeypatch.chdir(tmp_path)
+    """Point db.py at a throwaway SQLite file (DB_PATH is fixed at import time,
+    so chdir alone would NOT protect the real data/app.db)."""
     import db
-    importlib.reload(db)
-    yield db
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "app.db")
+    db.init_db()
+    return db
+
+
+@pytest.fixture
+def isolated_store(tmp_path, monkeypatch):
+    """Point store.py at a throwaway index dir and clear its RAM cache."""
+    import store
+    monkeypatch.setattr(store, "_INDEX_DIR", tmp_path / "index")
+    store._invalidate()
+    yield store
+    store._invalidate()

@@ -14,10 +14,6 @@ Model: intfloat/multilingual-e5-small
     indexed text. Skipping the prefix measurably hurts retrieval quality,
     so embed_query()/embed_passages() add it automatically — always use
     those instead of calling the model directly.
-
-IMPORTANT FIX: removed `import streamlit as st` and `@st.cache_resource`
-that were left over from the Streamlit version. Those would crash the
-server on startup since Streamlit is no longer installed.
 """
 
 import os
@@ -27,19 +23,20 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")   # silence fork warning
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DIM = 384
 
 # Module-level singleton — loaded once, reused for every request.
-# Previously used @st.cache_resource which crashes without Streamlit.
-_MODEL: SentenceTransformer | None = None
+# sentence_transformers is imported lazily so that importing this module
+# (e.g. for DIM / MODEL_NAME in store.py and the tests) stays instant.
+_MODEL = None
 
 
-def _get_model() -> SentenceTransformer:
+def _get_model():
     global _MODEL
     if _MODEL is None:
+        from sentence_transformers import SentenceTransformer
         _MODEL = SentenceTransformer(MODEL_NAME)
     return _MODEL
 
@@ -64,13 +61,3 @@ def embed_query(text: str) -> np.ndarray:
     """Embed a single search query. Adds the required 'query: ' prefix."""
     return _encode([f"query: {text}"])[0]
 
-
-# ── Backwards-compatible aliases (old call sites) ───────────────────
-def embed(texts: list[str]) -> np.ndarray:
-    """Deprecated: use embed_passages(). Kept so nothing breaks silently."""
-    return embed_passages(texts)
-
-
-def embed_one(text: str) -> np.ndarray:
-    """Deprecated: use embed_query()."""
-    return embed_query(text)

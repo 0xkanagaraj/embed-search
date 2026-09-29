@@ -533,9 +533,8 @@ const S = {
 // ── Helpers ──────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
-function csrfHdr() { return {}; }   // no auth — placeholder kept for api() compat
 async function api(method, path, body) {
-  const opts = { method, credentials: 'same-origin', headers: {} };
+  const opts = { method, headers: {} };
   if (body instanceof FormData) {
     opts.body = body;
   } else if (body) {
@@ -679,7 +678,6 @@ async function doSearch() {
   try {
     const resp = await fetch('/api/query', {
       method: 'POST',
-      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question: q, file_ids: fileIds, mode: mode, history: [], k: k }),
     });
@@ -690,6 +688,7 @@ async function doSearch() {
     let buf = '';
     let answerText = '';
     let sources = [];
+    let hadError = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -714,13 +713,14 @@ async function doSearch() {
           // If no sources were returned, kill the loading spinner immediately
           if (!sources.length && S.ragOn) hideAnswer();
         }
-        else if (data.type === 'token' && S.ragOn) {
+        else if (data.type === 'token' && S.ragOn && !hadError) {
           answerText += data.text;
           $('answerBox').classList.add('show');
           $('answerBody').innerHTML = '<div class="atext">' + esc(answerText) + '</div>';
         }
         else if (data.type === 'done') {
-          if (S.ragOn && answerText) {
+          if (hadError) { /* keep the error message on screen */ }
+          else if (S.ragOn && answerText) {
             $('answerBody').innerHTML = '<div class="atext">' + md(answerText) + '</div>';
             if (sources.length) {
               // sources.length is exactly k — the server respects the k we sent
@@ -734,10 +734,20 @@ async function doSearch() {
           }
         }
         else if (data.type === 'error') {
-          $('answerBody').innerHTML = '<div class="atext" style="color:#e8899a">' + esc(data.text) + '</div>';
+          hadError = true;
+          if (S.ragOn) {
+            // keep any partial answer, append the error under it
+            $('answerBox').classList.add('show');
+            $('answerBody').innerHTML =
+              (answerText ? '<div class="atext">' + md(answerText) + '</div>' : '') +
+              '<div class="atext" style="color:#e8899a">' + esc(data.text) + '</div>';
+          } else {
+            $('results').innerHTML = '<div class="empty-msg">Error: ' + esc(data.text) + '</div>';
+          }
         }
       }
     }
+    if (S.ragOn && !answerText && !hadError) hideAnswer();
   } catch(e) {
     $('results').innerHTML = '<div class="empty-msg">Error: ' + esc(e.message) + '</div>';
     hideAnswer();

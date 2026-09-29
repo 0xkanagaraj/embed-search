@@ -4,30 +4,25 @@ uvicorn[standard]
 python-multipart          # multipart file upload support for FastAPI
 
 # ── Document extraction ───────────────────────────────────────────
-pymupdf                   # PDF text layer (fitz) — faster & more robust than pypdf
-pdf2image                 # PDF → image for OCR fallback
-pytesseract               # OCR engine wrapper (tesseract must be installed)
-Pillow                    # image handling
-python-docx               # .docx / .doc  (NEW)
-openpyxl                  # .xlsx / .xls  (NEW)
-python-pptx               # .pptx / .ppt  (NEW)
-# csv, html.parser — stdlib, no install needed
+pymupdf                   # PDF text layer
+pdf2image                 # PDF page → image for the OCR fallback (needs poppler)
+pytesseract               # OCR wrapper (needs the tesseract binary installed)
+Pillow
+python-docx               # .docx
+openpyxl                  # .xlsx
+python-pptx               # .pptx
+# csv, html.parser — stdlib
 
-# ── Embeddings ────────────────────────────────────────────────────
+# ── Embeddings / retrieval ────────────────────────────────────────
 sentence-transformers     # multilingual-e5-small + cross-encoder reranker (auto-downloads on first run)
-torch                     # sentence-transformers runtime
-torchvision
 numpy
 rank_bm25                 # BM25 lexical scoring for hybrid search
 
 # ── LLM ───────────────────────────────────────────────────────────
-google-genai              # Gemini API client (streaming support)
+google-genai              # Gemini API client
 python-dotenv             # loads GOOGLE_API_KEY from .env
 
-# ── Auth / DB ─────────────────────────────────────────────────────
-bcrypt                    # password hashing
-# sqlite3 — stdlib
-
-# ── Testing (dev only) ──────────────────────────────────────────────
+# ── Testing (dev only) ────────────────────────────────────────────
 pytest
-httpx                     # FastAPI TestClient dependency
+httpx                     # FastAPI TestClient
+reportlab                 # builds a sample PDF in the ingest test

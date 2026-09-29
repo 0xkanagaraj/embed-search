@@ -24,6 +24,7 @@ Performance:
 
 import json
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -43,7 +44,8 @@ BM25_WEIGHT   = 0.35
 CANDIDATE_MULTIPLIER = 4
 CANDIDATE_MIN = 10   # minimum pool size even when k is very small (k=1,2)
 
-_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
+# \w+ is unicode-aware; the embedding model is multilingual, so BM25 must be too.
+_TOKEN_RE = re.compile(r"\w+")
 
 
 class IndexModelMismatch(Exception):
@@ -75,6 +77,11 @@ def _vectors_path() -> Path: return _INDEX_DIR / "vectors.npy"
 def _meta_path()   -> Path:  return _INDEX_DIR / "meta.json"
 
 _INDEX_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# Serialises read-modify-write cycles (append / remove) so two concurrent
+# uploads can't overwrite each other's chunks.
+_WRITE_LOCK = threading.RLock()
 
 
 # ── Cache: (chunks, vectors, bm25_index, mtime) ────────────────────
@@ -167,37 +174,38 @@ def save(chunks: list[dict], vectors: np.ndarray) -> None:
 
 # ── Public API ────────────────────────────────────────────────────
 def append(new_chunks: list[dict], new_vectors: np.ndarray) -> None:
-    chunks, vectors, _ = load()
-    chunks  = chunks + new_chunks
-    vectors = np.vstack([vectors, new_vectors]) if len(vectors) else new_vectors
-    save(chunks, vectors)
+    with _WRITE_LOCK:
+        chunks, vectors, _ = load()
+        chunks  = chunks + new_chunks
+        vectors = np.vstack([vectors, new_vectors]) if len(vectors) else new_vectors
+        save(chunks, vectors)
 
 
 def remove_file(file_id: int, filename: Optional[str] = None) -> None:
-    # Deleting a file doesn't depend on vector-space compatibility.
-    chunks, vectors, _ = load(check_model=False)
-    if not chunks:
-        return
-    fid_int = int(file_id) if file_id is not None else None
-    keep = []
-    for c in chunks:
-        c_fid = int(c.get("file_id", -1))
-        c_fn  = c.get("filename")
-        if fid_int is not None and c_fid == fid_int:
-            keep.append(False)
-        elif filename is not None and c_fn == filename:
-            keep.append(False)
-        else:
-            keep.append(True)
-    keep_arr = np.array(keep, dtype=bool)
-    if len(vectors) == len(chunks):
-        new_vectors = vectors[keep_arr] if keep_arr.any() else np.zeros((0, DIM), dtype="float32")
-    else:
-        new_vectors = np.zeros((0, DIM), dtype="float32")
-    save(
-        [c for c, k in zip(chunks, keep_arr) if k],
-        new_vectors,
-    )
+    """Drop every chunk belonging to `file_id` (or, for stale data, `filename`)."""
+    with _WRITE_LOCK:
+        # Deleting a file doesn't depend on vector-space compatibility.
+        chunks, vectors, _ = load(check_model=False)
+        if not chunks:
+            return
+        keep = np.array(
+            [
+                not (
+                    c.get("file_id") == file_id
+                    or (filename is not None and c.get("filename") == filename)
+                )
+                for c in chunks
+            ],
+            dtype=bool,
+        )
+        if keep.all():
+            return                       # nothing to remove — skip the rewrite
+        if len(vectors) != len(chunks):
+            # chunks.jsonl and vectors.npy are out of sync (corrupt index).
+            # Never write chunks without matching vectors; reset both.
+            save([], np.zeros((0, DIM), dtype="float32"))
+            return
+        save([c for c, k in zip(chunks, keep) if k], vectors[keep])
 
 
 def _minmax(scores: np.ndarray) -> np.ndarray:
@@ -226,7 +234,8 @@ def search(
     if file_ids is not None:
         if not file_ids:
             return []
-        mask = np.array([c.get("file_id") in file_ids for c in chunks])
+        wanted = set(file_ids)
+        mask = np.array([c.get("file_id") in wanted for c in chunks])
         if not mask.any():
             return []
         idx       = np.where(mask)[0]
@@ -259,11 +268,3 @@ def search(
         }
         for i in top
     ]
-
-
-def stats() -> dict:
-    p = _meta_path()
-    if not p.exists():
-        return {"count": 0}
-    with open(p) as f:
-        return json.load(f)

@@ -1,10 +1,8 @@
 """
 llm.py — Gemini wrapper.
 
-Two modes:
-  generate()        — blocking, returns the full answer string.
-  stream_generate() — sync generator, yields text tokens as they arrive.
-                      Use this for the streaming SSE endpoint.
+stream_generate() is a sync generator that yields text tokens as they
+arrive; the SSE endpoint drives it from a background thread.
 """
 
 import os
@@ -16,7 +14,19 @@ from google.genai import types
 
 load_dotenv()
 
-_client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+_client = None
+
+
+def _get_client():
+    """Create the Gemini client lazily so a missing key gives a clear error
+    at query time instead of a KeyError that stops the whole server booting."""
+    global _client
+    if _client is None:
+        key = os.environ.get("GOOGLE_API_KEY")
+        if not key:
+            raise RuntimeError("GOOGLE_API_KEY is not set (add it to .env).")
+        _client = genai.Client(api_key=key)
+    return _client
 
 MODEL = "gemini-2.5-flash"
 
@@ -62,37 +72,17 @@ def _prompt(question: str, context: str, history: list[dict] | None = None) -> s
     )
 
 
-# ── Blocking ──────────────────────────────────────────────────────
-def generate(question: str, context: str, history: list[dict] | None = None) -> str:
-    """Return the complete answer as a single string."""
-    try:
-        resp = _client.models.generate_content(
-            model=MODEL,
-            contents=_prompt(question, context, history),
-            config=_CONFIG,
-        )
-        return resp.text or "(The model returned an empty or filtered response.)"
-    except Exception as e:
-        return f"LLM error: {e}"
-
-
 # ── Streaming ─────────────────────────────────────────────────────
 def stream_generate(question: str, context: str,
                      history: list[dict] | None = None) -> Generator[str, None, None]:
     """
     Yield text tokens as they are produced by the model.
 
-    Designed to be driven from a background thread:
-
-        def _run():
-            for tok in stream_generate(q, ctx):
-                queue.put(tok)
-            queue.put(None)   # sentinel
-
-        threading.Thread(target=_run, daemon=True).start()
+    Errors are yielded as a final "[LLM error: ...]" token rather than raised,
+    so the SSE stream always ends cleanly.
     """
     try:
-        for chunk in _client.models.generate_content_stream(
+        for chunk in _get_client().models.generate_content_stream(
             model=MODEL,
             contents=_prompt(question, context, history),
             config=_CONFIG,

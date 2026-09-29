@@ -1,12 +1,11 @@
 """
-db.py — SQLite store for file metadata and query observability.
+db.py — SQLite store for file metadata and query stats.
 
-No auth, no sessions. Just:
-  - files table  : tracks uploaded file names, paths, chunk counts
-  - query_log    : lightweight observability (query count, latency)
+  - files     : uploaded file names, paths, chunk counts
+  - query_log : query count / latency for the /api/stats endpoint
 """
 import sqlite3
-import time
+from contextlib import contextmanager
 from pathlib import Path
 
 _HERE   = Path(__file__).parent
@@ -14,10 +13,17 @@ DB_PATH = _HERE / "data" / "app.db"
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
+@contextmanager
 def _conn():
+    """Open a connection, commit on success / roll back on error, always close.
+    (sqlite3's own `with conn:` commits but never closes the connection.)"""
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
-    return c
+    try:
+        with c:
+            yield c
+    finally:
+        c.close()
 
 
 def init_db():
@@ -47,13 +53,12 @@ def init_db():
 # ── Files ─────────────────────────────────────────────────────────
 def add_file(filename: str, path: str, n_chunks: int = 0) -> int:
     with _conn() as c:
-        cur = c.execute(
+        c.execute(
             "INSERT INTO files (filename, path, n_chunks) VALUES (?, ?, ?) "
             "ON CONFLICT(filename) DO UPDATE SET path=excluded.path, n_chunks=excluded.n_chunks",
             (filename, path, n_chunks),
         )
-        if cur.lastrowid:
-            return cur.lastrowid
+        # cursor.lastrowid is unreliable after an upsert-update, so always look it up.
         row = c.execute("SELECT id FROM files WHERE filename=?", (filename,)).fetchone()
         return row["id"]
 
